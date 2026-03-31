@@ -296,8 +296,8 @@ class VromlixOrchestrator:
 
     def _load_config(self):
         if not os.path.exists(self.config_path):
-            print(
-                f"⚠️ AVISO: No se encontró config en {self.config_path}. Usando defaults."
+            logging.warning(
+                f"AVISO: No se encontró config en {self.config_path}. Usando defaults."
             )
             return None
         spec = importlib.util.spec_from_file_location("config_module", self.config_path)
@@ -306,8 +306,10 @@ class VromlixOrchestrator:
         return config
 
     def get_model(self, role):
-        if not self.config:
-            return "gemini-3-flash-preview"
+        # Fallback si no hay config pero se pide un rol estándar para evitar crashes
+        if not self.config and role.upper() in ["VOLUMEN", "CONSULTA", "PRIME", "REASONING"]:
+            return "gemini-2.0-flash-exp"
+
         attr_name = f"MODELO_{role.upper()}"
         model = getattr(self.config, attr_name, None)
         if not model:
