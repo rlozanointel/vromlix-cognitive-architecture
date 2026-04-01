@@ -1,0 +1,8 @@
+LICENSE.md
+README.md
+pyproject.toml
+vromlix_cognitive_architecture.egg-info/PKG-INFO
+vromlix_cognitive_architecture.egg-info/SOURCES.txt
+vromlix_cognitive_architecture.egg-info/dependency_links.txt
+vromlix_cognitive_architecture.egg-info/requires.txt
+vromlix_cognitive_architecture.egg-info/top_level.txt
