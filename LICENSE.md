@@ -1,3 +1,6 @@
+---
+descripcion: "Este archivo establece los términos legales y permisos de uso bajo la licencia MIT para este software."
+---
 MIT License
 
 Copyright (c) 2026 Rogelio Lozano

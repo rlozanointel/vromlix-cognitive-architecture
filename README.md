@@ -1,3 +1,6 @@
+---
+descripcion: "Vromlix Prime es un sistema de orquestación multi-agente determinista optimizado para ejecutar modelos de lenguaje en entornos de recursos limitados."
+---
 # 🧠 Vromlix Prime v4.0: Cognitive Edge Architecture
 
 An advanced, deterministic Multi-Agent Orchestration system engineered for sovereign, high-performance execution in severely resource-constrained environments (Sub-8GB RAM edge computing). 
