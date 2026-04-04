@@ -30,11 +30,11 @@ import feedparser
 import httpx
 import instructor
 import numpy as np
-import umap
+
+# umap y sklearn se importan de forma perezosa dentro de RaptorEngine para evitar dependencias forzadas
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
-from sklearn.mixture import GaussianMixture
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="duckduckgo_search")
@@ -49,19 +49,20 @@ logging.getLogger("httpx").setLevel(logging.ERROR)
 
 # --- LÓGICA DE CONSTANTES SOTA ---
 SOTA_DEPENDENCIES = [
-    "pydantic>=2.10.0",
-    "google-genai",
-    "sqlite-vec",
-    "duckduckgo-search",
-    "markitdown",
+    "pydantic>=2.12.5",
+    "google-genai>=1.68.0",
+    "instructor>=1.7.0",
+    "tenacity>=9.0.0",
+    "httpx>=0.28.1",
+    "numpy>=2.2.6",
+    "sqlite-vec>=0.1.9",
+    "feedparser>=6.0.12",
+    "duckduckgo-search>=8.1.1",
+    "markitdown>=0.0.1a4",
+    "lxml>=5.1.0",
+    "tqdm>=4.67.3",
     "google-api-core",
-    "google.genai",
-    "httpx",
-    "httpcore",
-    "absl",
     "urllib3",
-    "tenacity",
-    "instructor",
 ]
 
 # ==============================================================================
@@ -649,6 +650,16 @@ class VromlixRaptorEngine:
     def determine_optimal_clusters(
         self, embeddings_matrix: np.ndarray, max_k: int = 50
     ) -> tuple:
+        # Importación perezosa SOTA: Solo si se requiere clusterización
+        try:
+            import umap
+            from sklearn.mixture import GaussianMixture
+        except ImportError:
+            logging.error(
+                "❌ [RAPTOR] Error: 'umap-learn' o 'scikit-learn' no instalados. Instálalos para usar consolidación."
+            )
+            return (None, None)
+
         N = len(embeddings_matrix)
         if N < 12:
             return (1, np.zeros(N, dtype=int)) if N > 0 else (None, None)

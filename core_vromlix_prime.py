@@ -1,17 +1,21 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "google-genai",
-#     "sqlite-vec",
-#     "ddgs",
-#     "feedparser>=6.0.12",
+#     "google-genai>=1.68.0",
+#     "instructor>=1.7.0",
+#     "tenacity>=9.0.0",
 #     "httpx>=0.28.1",
+#     "numpy>=2.2.6",
 #     "pydantic>=2.12.5",
-#     "tenacity",
-#     "instructor"
+#     "sqlite-vec>=0.1.9",
+#     "duckduckgo-search>=8.1.1",
+#     "feedparser>=6.0.12",
+#     "lxml>=5.1.0",
+#     "tqdm>=4.67.3",
+#     "markitdown>=0.0.1a4",
 # ]
 # ///
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 # -*- coding: utf-8 -*-
 # @description Vromlix Prime V2.0: Infraestructura, Memoria a Corto Plazo y Monitor de Tokens.
 
