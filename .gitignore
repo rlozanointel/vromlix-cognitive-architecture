@@ -18,3 +18,8 @@ config_api_keys_secrets.py
 # OS
 .DS_Store
 Thumbs.db
+
+# Ocultar lógica centralizada (Sincronizada vía CORE)
+vromlix_utils.py
+core_vromlix_prime.py
+*.egg-info/
