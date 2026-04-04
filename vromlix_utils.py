@@ -222,8 +222,16 @@ class ActiveKeyManager:
         self.cooldown = cooldown_seconds
         # Rastrea la última vez (timestamp) que se usó cada llave
         self.last_used = {key: 0.0 for key in keys}
-        # Empezar en un índice aleatorio para distribuir el desgaste de RPD (20/día)
+        # Rastrea llaves que fallaron por cuota (timestamp de expiración de la suspensión)
+        self.suspended_until = {key: 0.0 for key in keys}
+        # Registro global de fallos recientes para detectar congestión regional
+        self.recent_failures = []
+        # Empezar en un índice aleatorio para distribuir el desgaste de RPD
         self.current_idx = random.randint(0, max(0, len(keys) - 1)) if keys else 0
+
+        # Silenciar los logs de los SDKs para brevedad SOTA
+        logging.getLogger("instructor").setLevel(logging.ERROR)
+        logging.getLogger("google.genai").setLevel(logging.ERROR)
 
     def get_fresh_key(self) -> str | None:
         if not self.keys:
@@ -234,33 +242,59 @@ class ActiveKeyManager:
 
         while attempts < total_keys:
             candidate_key = self.keys[self.current_idx]
-            time_since_last_use = time.time() - self.last_used[candidate_key]
+            now = time.time()
+            time_since_last_use = now - self.last_used[candidate_key]
+            is_suspended = now < self.suspended_until[candidate_key]
 
-            # Si la llave ya se enfrió, la entregamos inmediatamente
-            if time_since_last_use >= self.cooldown:
-                self.last_used[candidate_key] = time.time()
+            # Si la llave ya se enfrió y no está suspendida por fallo previo
+            if time_since_last_use >= self.cooldown and not is_suspended:
+                self.last_used[candidate_key] = now
                 self.current_idx = (self.current_idx + 1) % total_keys
                 return candidate_key
 
-            # Si no está fría, pasamos a la siguiente llave
+            # Si no está disponible, pasamos a la siguiente llave
             self.current_idx = (self.current_idx + 1) % total_keys
             attempts += 1
 
-        # Si llegamos aquí, significa que TODAS las 110 llaves se usaron en los últimos 61 segundos.
-        # En lugar de fallar, calculamos cuánto falta para que la llave más antigua se enfríe y esperamos.
-        oldest_key = min(self.last_used, key=lambda k: self.last_used[k])
-        time_to_wait = self.cooldown - (time.time() - self.last_used[oldest_key])
+        # Si llegamos aquí, significa que TODAS las llaves están en uso o suspendidas.
+        # Buscamos la que primero vaya a estar lista (entre cooldown o fin de suspensión)
+        best_key = None
+        min_wait = float("inf")
 
-        if time_to_wait > 0:
-            # print(f"   [VROMLIX UTILS] Pausa térmica de seguridad: {time_to_wait:.1f}s...")
-            time.sleep(time_to_wait)
+        for key in self.keys:
+            wait_cooldown = self.cooldown - (time.time() - self.last_used[key])
+            wait_suspension = self.suspended_until[key] - time.time()
+            wait_needed = max(0, wait_cooldown, wait_suspension)
+            if wait_needed < min_wait:
+                min_wait = wait_needed
+                best_key = key
 
-        # Tras la pausa, la llave más vieja ya está lista
-        self.last_used[oldest_key] = time.time()
+        if min_wait > 0 and best_key:
+            # SOTA Intelligence: No dormimos más de 10s para evitar "congelar" el proceso.
+            # Es mejor dejar que el script falle y reintente después con una llave distinta.
+            wait_time = min(10.0, min_wait)
+            time.sleep(wait_time)
 
-        # Sincronizamos el índice para continuar desde la llave que acabamos de entregar
-        self.current_idx = (self.keys.index(oldest_key) + 1) % total_keys
-        return oldest_key
+        if best_key:
+            self.last_used[best_key] = time.time()
+            self.current_idx = (self.keys.index(best_key) + 1) % total_keys
+            return best_key
+        return None
+
+    def report_failure(self, key: str, duration: float = 300.0):
+        """Marca una llave como agotada (429) por un periodo determinado (5 min)."""
+        now = time.time()
+        if key in self.suspended_until:
+            self.suspended_until[key] = now + duration
+            self.recent_failures.append(now)
+            
+            # Limpiar historial de fallos anticuado (> 60s)
+            self.recent_failures = [f for f in self.recent_failures if now - f < 60]
+            
+            # Si detectamos más de 5 fallos en 60s, aplicamos un "Goteo Forzoso" (Global Backoff)
+            if len(self.recent_failures) > 5:
+                # print("   🚨 [REGIONAL QUOTA] Congestión detectada. Aplicando retardo global SOTA...")
+                time.sleep(10) # Pausa estratégica para que la región respire
 
 
 class VromlixOrchestrator:
@@ -388,6 +422,10 @@ class VromlixOrchestrator:
     def get_api_key(self):
         """Retorna una llave garantizada como fresca (fuera del cooldown)."""
         return self.key_manager.get_fresh_key()
+
+    def report_exhaustion(self, key: str):
+        """Informa al gestor que una llave ha devuelto un error 429."""
+        self.key_manager.report_failure(key)
 
     def get_secret(self, key_name: str):
         try:
