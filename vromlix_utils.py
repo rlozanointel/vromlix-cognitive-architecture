@@ -15,27 +15,27 @@ os.environ["GLOG_minloglevel"] = "2"
 import importlib.util
 import json
 import logging
-import sys
-import urllib.parse
 import re
-import time
-import httpx
-import feedparser
 import sqlite3
-import numpy as np
-import umap
-import instructor
-from pathlib import Path
-from typing import Any, List, Optional
-from pydantic import BaseModel, Field
-from google import genai
-from google.genai import types
-from tenacity import retry, stop_after_attempt, wait_exponential
-from sklearn.mixture import GaussianMixture
-
+import sys
+import time
+import urllib.parse
 
 # --- CONFIGURACIÓN DE FILTROS ---
 import warnings
+from pathlib import Path
+from typing import Any, List, Optional
+
+import feedparser
+import httpx
+import instructor
+import numpy as np
+import umap
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+from sklearn.mixture import GaussianMixture
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="duckduckgo_search")
 logging.getLogger("duckduckgo_search").setLevel(logging.ERROR)
