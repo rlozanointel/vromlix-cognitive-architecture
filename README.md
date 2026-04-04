@@ -8,6 +8,12 @@ Vromlix operates under a strict deterministic delegation model. It replaces zero
 
 ```mermaid
 graph TD;
+    subgraph Ingestion[Data Ingestion Pipeline]
+        I1[osint_intel_compiler] --> I2[auto_indexador]
+        I2 --> I3[core_raptor_engine]
+        I3 --> F[(SQLite-Vec Deep Memory)]
+    end
+
     subgraph Interfaces[Input Layer]
         A[Terminal UI / Human] --> B{MCTS Pydantic Router};
         A2[FastAPI Headless Proxy] --> B;
@@ -20,7 +26,7 @@ graph TD;
 
     subgraph Sovereign Memory[Hindsight W-B-O-S Architecture]
         C <--> E[GraphRAG 1-Hop Traversal];
-        E <--> F[(SQLite-Vec Deep Memory)];
+        E <--> F;
     end
 
     subgraph Edge Compute[Local Execution]
@@ -30,6 +36,11 @@ graph TD;
 ```
 
 ## 🚀 Technical Highlights
+
+*   **Ingestion Pipeline (SOTA ETL):** 
+    *   **osint_intel_compiler:** Automated harvesting of ArXiv papers, GitHub repos, and AI news.
+    *   **auto_indexador:** Semantic indexing and metadata normalization.
+    *   **core_raptor_engine:** Hierarchical clustering and recursive summarization for long-term memory (RAPTOR).
 
 * **MCTS-Driven MoE Routing:** Replaces fragile zero-shot routing with a lightweight Monte Carlo Tree Search (MCTS) heuristic. The system mathematically simulates and scores multiple Directed Acyclic Graph (DAG) execution paths via Pydantic before delegating tasks.
 * **Edge-Optimized GraphRAG & W-B-O-S Memory:** Eliminates context amnesia by implementing a Hindsight epistemic memory taxonomy (World, Biographical, Opinion, Summary). Utilizes SQLite Recursive CTEs for 1-Hop neighborhood traversal, achieving GraphRAG capabilities without heavy JVM graph databases.
