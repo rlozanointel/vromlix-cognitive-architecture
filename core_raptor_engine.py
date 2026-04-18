@@ -8,7 +8,6 @@
 #     "google-genai>=1.68.0",
 #     "pydantic>=2.12.5",
 #     "sqlite-vec>=0.1.3",
-#     "fastembed>=0.5.1",
 #     "scikit-learn>=1.5.0",
 #     "scikit-learn-intelex",
 #     "umap-learn>=0.5.11",
@@ -16,39 +15,42 @@
 #     "markitdown>=0.0.1a4",
 #     "feedparser>=6.0.12",
 #     "lxml>=5.1.0",
+#     "llama-cpp-python>=0.2.56",
+#     "jsonref>=1.1.0",
 # ]
 # ///
+
 # -*- coding: utf-8 -*-
 # @description RAPTOR Memory Consolidation (v1.0) - SOTA Wrapper.
 
+import argparse
+import logging
+import os
 import sys
+import warnings
+from pathlib import Path
 
-# Fix: Ensure the engine finds vromlix_utils in the root of the partition/repository
-VROMLIX_ROOT = "/media/rogerman/14befb81-4210-4134-a9a0-0ee76166e483/VROMLIX_CORE"
-if VROMLIX_ROOT not in sys.path:
-    sys.path.append(VROMLIX_ROOT)
+from vromlix_utils import VromlixRaptorEngine, vromlix
 
-import argparse  # noqa: E402
-import logging  # noqa: E402
-import os  # noqa: E402
-
-from vromlix_utils import VromlixRaptorEngine  # noqa: E402
-
-# --- SILENCIO SOTA ---
+# --- SOTA SILENCE ---
+warnings.filterwarnings("ignore", category=UserWarning, module="umap")
 logging.getLogger("sklearnex").setLevel(logging.ERROR)
 logging.getLogger().setLevel(logging.ERROR)
 
 # --- SOTA Intel Optimization ---
 try:
-    from sklearnex import patch_sklearn  # type: ignore
+    from sklearnex import patch_sklearn
 
     old_stdout = sys.stdout
-    sys.stdout = open(os.devnull, "w")
-    try:
-        patch_sklearn()
-    finally:
-        sys.stdout.close()
-        sys.stdout = old_stdout
+    old_stderr = sys.stderr
+    with Path(os.devnull).open("w") as devnull:
+        sys.stdout = devnull
+        sys.stderr = devnull
+        try:
+            patch_sklearn()
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 except ImportError:
     pass
 
@@ -57,16 +59,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "--full",
         action="store_true",
-        help="Borra la jerarquía actual y realiza una consolidación global.",
+        help="Delete current hierarchy and perform global consolidation.",
+    )
+    parser.add_argument(
+        "--db",
+        type=str,
+        default="vromlix_memory.sqlite",
+        help="Nombre de la base de datos a consolidar (ej. media_transcripts.sqlite)",
     )
     args = parser.parse_args()
 
-    # Inicialización del Engine Centralizado
-    print("🦉 Launching RAPTOR SOTA Consolidator...")
-    engine = VromlixRaptorEngine()
+    # Centralized Engine Initialization
+    db_target = str(vromlix.paths.databases / args.db)
+    print(f"🦅 Launching RAPTOR SOTA Consolidator on {args.db}...")
+    engine = VromlixRaptorEngine(db_path=db_target)
     try:
         engine.run_consolidation(force_full=args.full)
     except KeyboardInterrupt:
-        print("\n🛑 Proceso interrumpido por el usuario.")
+        print("\n Process interrupted by user.")
     except Exception as e:
-        print(f"\n❌ Error Crítico: {e}")
+        print(f"\n Critical Error: {e}")

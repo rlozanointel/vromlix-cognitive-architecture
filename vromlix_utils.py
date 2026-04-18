@@ -1,58 +1,41 @@
 #!/usr/bin/env -S uv run
-# -*- coding: utf-8 -*-
 # /// script
 # dependencies = [
-#   "pydantic>=2.12.5",
-#   "google-genai>=1.68.0",
-#   "instructor>=1.7.0",
-#   "tenacity>=9.0.0",
-#   "httpx>=0.28.1",
-#   "numpy>=2.2.6",
-#   "sqlite-vec>=0.1.9",
-#   "feedparser>=6.0.12",
-#   "duckduckgo-search>=8.1.1",
-#   "markitdown>=0.0.1a4",
-#   "lxml>=5.1.0",
-#   "tqdm>=4.67.3",
-#   "google-api-core",
-#   "urllib3",
-#   "jsonref",
+#   "pydantic>=2.12.5", "google-genai>=1.68.0", "instructor>=1.7.0",
+#   "tenacity>=9.0.0", "httpx>=0.28.1", "numpy>=2.2.6", "sqlite-vec>=0.1.9",
+#   "feedparser>=6.0.12", "duckduckgo-search>=8.1.1", "markitdown>=0.0.1a4",
+#   "lxml>=5.1.0", "tqdm>=4.67.3", "google-api-core", "urllib3", "jsonref",
+#   "openai>=1.14.0", "llama-cpp-python>=0.2.56"
 # ]
 # ///
-# @description Este módulo orquesta el entorno, gestiona rutas globales y filtra logs para optimizar la ejecución de servicios en Vromlix.
 """
-VROMLIX UTILS - Centralized Orchestrator v3.0.2
-Version: 3.0.2 (Marzo 2026) - RAPTOR SOTA Fixed
+VROMLIX UTILS - Centralized Orchestrator v3.0.4
 Purpose: Environment detection, API Hot-Swapping, RAPTOR Consolidation, and I/O Management.
 """
-
-import os
-
-os.environ["GRPC_VERBOSITY"] = "ERROR"
-os.environ["GLOG_minloglevel"] = "2"
 
 import importlib.util
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
+import threading
 import time
 import urllib.parse
-
-# --- CONFIGURACIÓN DE FILTROS ---
 import warnings
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, ClassVar
 
 import feedparser
 import httpx
 import instructor
 import numpy as np
-
-# umap y sklearn se importan de forma perezosa dentro de RaptorEngine para evitar dependencias forzadas
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -62,31 +45,27 @@ logging.getLogger("google.ai.generativelanguage").setLevel(logging.ERROR)
 logging.getLogger("absl").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.ERROR)
 
-# Liniers SOTA: Ignoramos advertencias de tipos para librerías sin stubs específicos
-# pyright: reportMissingImports=false
-# mypy: ignore-missing-imports
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_MINLOGLEVEL"] = "2"
 
-# --- LÓGICA DE CONSTANTES SOTA ---
-SOTA_DEPENDENCIES = [
-    "pydantic>=2.12.5",
-    "google-genai>=1.68.0",
-    "instructor>=1.7.0",
-    "tenacity>=9.0.0",
-    "httpx>=0.28.1",
-    "numpy>=2.2.6",
-    "sqlite-vec>=0.1.9",
-    "feedparser>=6.0.12",
-    "duckduckgo-search>=8.1.1",
-    "markitdown>=0.0.1a4",
-    "lxml>=5.1.0",
-    "tqdm>=4.67.3",
-    "google-api-core",
-    "urllib3",
-]
 
-# ==============================================================================
-# CONFIGURACIÓN GLOBAL DE LOGGING Y SILENCIADOR AFC
-# ==============================================================================
+class VromlixUsage:
+    """Normalizes token counting between Google and OpenAI/GitHub."""
+
+    def __init__(self, prompt_tokens, candidate_tokens):
+        self.prompt_token_count = prompt_tokens
+        self.candidates_token_count = candidate_tokens
+
+
+class VromlixResponse:
+    """Unified response object to maintain compatibility with Prime."""
+
+    def __init__(self, text: str, thoughts: str = "", usage=None):
+        self.text = text
+        self.thoughts = thoughts
+        self.usage_metadata = usage
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - [VROMLIX PRIME] - %(levelname)s - %(message)s",
@@ -97,11 +76,7 @@ logging.basicConfig(
 class AFCSilencer(logging.Filter):
     def filter(self, record):
         msg = record.getMessage()
-        if "AFC is enabled" in msg:
-            return False
-        if "response: https://" in msg:
-            return False  # Silencia los INFO de DuckDuckGo
-        return True
+        return not ("AFC is enabled" in msg or "response: https://" in msg)
 
 
 for logger_name in [
@@ -110,11 +85,6 @@ for logger_name in [
     "google.api_core",
     "google.genai",
     "httpx",
-    # dependencies = [
-    #     "google-genai",
-    #     "httpx>=0.28.1",
-    #     "tenacity"
-    # ]
     "httpcore",
     "absl",
     "urllib3",
@@ -128,54 +98,40 @@ root_logger.addFilter(AFCSilencer())
 for handler in root_logger.handlers:
     handler.addFilter(AFCSilencer())
 
-# Asegurar que los loggers ruidosos silencien esto antes de propagar
-for noisy_logger in ["absl", "grpc", "google.api_core", "google.genai"]:
-    logger_instance = logging.getLogger(noisy_logger)
-    logger_instance.addFilter(AFCSilencer())
-    for handler_instance in logger_instance.handlers:
-        handler_instance.addFilter(AFCSilencer())
-
 
 class OSINTGrounder:
-    """
-    Motor de Inteligencia OSINT SOTA (Zero-Cost Architecture).
-    Utiliza Google News RSS Multiplexing para evadir bloqueos IP y extraer noticias en tiempo real.
-    """
+    """SOTA OSINT Engine. Uses Google News RSS Multiplexing to evade IP blocks."""
 
     @staticmethod
     def clean_value(val: Any) -> Any:
         if isinstance(val, str):
             clean = re.sub(r"<[^>]+>", "", val)
-            clean = re.sub(r"\s+", " ", clean)
-            return clean.strip()
+            return re.sub(r"\s+", " ", clean).strip()
         return val
 
     @classmethod
     def fetch_news_rss(cls, query: str, max_results: int = 30) -> list[dict[str, Any]]:
-        """Extrae noticias estructuradas vía XML nativo de Google News."""
-        # Forzamos comillas para exactitud: "Nombre de la Startup"
         encoded_query = urllib.parse.quote_plus(f'"{query}"')
         url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         results = []
         try:
             response = httpx.get(url, headers=headers, timeout=10.0)
             if response.status_code == 200:
                 feed = feedparser.parse(response.content)
-                for entry in feed.entries[:max_results]:
-                    results.append(
+                results.extend(
+                    [
                         {
                             "title": getattr(entry, "title", ""),
                             "link": getattr(entry, "link", ""),
                             "published": getattr(entry, "published", ""),
                             "source": getattr(entry, "source", {}).get("title", ""),
                         }
-                    )
+                        for entry in feed.entries[:max_results]
+                    ]
+                )
         except Exception as e:
-            logging.warning(f"[OSINT] Advertencia en feed RSS para '{query}': {e}")
+            logging.warning(f"[OSINT] Warning in RSS feed for '{query}': {e}")
         return results
 
     @retry(
@@ -184,43 +140,36 @@ class OSINTGrounder:
         reraise=False,
     )
     def fetch_rss_summary(self, url: str) -> str:
-        """Fetch and summarize RSS feed with SOTA resilience."""
         try:
             with httpx.Client(timeout=15.0) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
                 feed = feedparser.parse(resp.text)
-
-                # SOTA Extraction: Title + Summary of the first 3 items
                 items = [f"{e.title}: {e.summary[:200]}" for e in feed.entries[:3]]
                 return "\n".join(items) if items else "No entries found."
         except Exception as e:
-            print(f"   ⚠️ RSS Fail: {e}")
+            logging.warning(f"[OSINT] RSS Fail: {e}")
             return f"RSS Error: {e}"
 
     @classmethod
-    def execute_deep_research(
-        cls, queries: list[str], prompt_template: str = ""
-    ) -> str:
+    def execute_deep_research(cls, queries: list[str], prompt_template: str = "") -> str:
         if not queries:
             return ""
-
         master_doc: dict[str, Any] = {"research_data": {}}
         logging.info(
-            f"🌐 [OSINT] Fase 1 (MAP): Extrayendo Google News RSS para {len(queries)} queries..."
+            f"🌐 [OSINT] Phase 1 (MAP): Extracting Google News RSS for {len(queries)} queries..."
         )
 
         for query in queries:
-            query_data = {}
-            query_data["news_results"] = cls.fetch_news_rss(query, max_results=40)
-            master_doc["research_data"][query] = query_data
-            time.sleep(1.0)  # Pausa táctica
+            master_doc["research_data"][query] = {
+                "news_results": cls.fetch_news_rss(query, max_results=40)
+            }
+            time.sleep(1.0)
 
-        logging.info("🧠 [OSINT] Fase 2 (REDUCE): Sintetizando datos con Flash Lite...")
+        logging.info("🧠 [OSINT] Phase 2 (REDUCE): Synthesizing data with Flash Lite...")
         raw_json = json.dumps(master_doc, ensure_ascii=False)
-
-        # Inyección de Dependencia: Usamos el prompt que viene del XML
-        prompt_sintesis = prompt_template.format(raw_json=raw_json[:80000])
+        json_slice = str(raw_json)[:80000]
+        prompt_sintesis = prompt_template.format(raw_json=json_slice)
 
         try:
             client = genai.Client(api_key=vromlix.get_api_key())
@@ -229,105 +178,205 @@ class OSINTGrounder:
                 contents=prompt_sintesis,
                 config=types.GenerateContentConfig(temperature=0.1),
             )
-            logging.info("✅ [OSINT] Reporte Ejecutivo RSS generado exitosamente.")
+            logging.info("✅ [OSINT] Executive RSS Report generated successfully.")
             res_text = getattr(response, "text", "")
             return res_text.strip() if res_text else ""
         except Exception as e:
-            logging.error(f"❌ Error en síntesis OSINT: {e}")
-            return "ERROR: Fallo en la síntesis de noticias."
+            logging.error(f"❌ Error in OSINT synthesis: {e}")
+            return "ERROR: News synthesis failed."
 
 
 class ActiveKeyManager:
-    """
-    SOTA Round-Robin Load Balancer para APIs de Google.
-    Garantiza que una llave no se reutilice antes de un tiempo de enfriamiento (Cooldown).
-    """
+    """SOTA Round-Robin Load Balancer for Google APIs with SQLite persistence."""
 
-    def __init__(self, keys: list[str], cooldown_seconds: float = 61.0):
+    def __init__(
+        self,
+        keys: list[str],
+        cooldown_seconds: float = 61.0,
+        db_path: str | None = None,
+    ):
         import random
 
         self.keys = keys
         self.cooldown = cooldown_seconds
-        # Rastrea la última vez (timestamp) que se usó cada llave
-        self.last_used = {key: 0.0 for key in keys}
-        # Rastrea llaves que fallaron por cuota (timestamp de expiración de la suspensión)
-        self.suspended_until = {key: 0.0 for key in keys}
-        # Registro global de fallos recientes para detectar congestión regional
+        self.db_path = db_path
+        self.last_used = dict.fromkeys(keys, 0.0)
+        self.suspended_until = dict.fromkeys(keys, 0.0)
         self.recent_failures: list[float] = []
-        # Empezar en un índice aleatorio para distribuir el desgaste de RPD
         self.current_idx = random.randint(0, max(0, len(keys) - 1)) if keys else 0
+        self._db_lock = threading.Lock()
+        self._db_conn: sqlite3.Connection | None = None
 
-        # Silenciar los logs de los SDKs para brevedad SOTA
         logging.getLogger("instructor").setLevel(logging.ERROR)
         logging.getLogger("google.genai").setLevel(logging.ERROR)
+
+        if self.db_path:
+            self._init_db()
+            self._load_suspensions()
+
+    def _get_db(self) -> sqlite3.Connection:
+        assert self.db_path is not None, "_get_db called without a db_path"
+        if self._db_conn is None:
+            # We already asserted db_path is not None above
+            db_p = str(self.db_path)
+            self._db_conn = sqlite3.connect(db_p, check_same_thread=False)
+            self._db_conn.execute("PRAGMA journal_mode=WAL")
+            self._db_conn.execute("PRAGMA busy_timeout=5000")
+        return self._db_conn
+
+    def _init_db(self):
+        assert self.db_path is not None, "_init_db called without a db_path"
+        Path(Path(self.db_path).parent).mkdir(parents=True, exist_ok=True)
+        conn = self._get_db()
+        with self._db_lock:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS key_suspensions "
+                "(api_key TEXT PRIMARY KEY, suspended_until REAL)"
+            )
+            conn.commit()
+
+    def _load_suspensions(self):
+        try:
+            with self._db_lock:
+                conn = self._get_db()
+                cursor = conn.cursor()
+                cursor.execute("SELECT api_key, suspended_until FROM key_suspensions")
+                for key_val, suspended_until_val in cursor.fetchall():
+                    s_key = str(key_val)
+                    s_until = float(suspended_until_val)
+                    if s_key in self.suspended_until and s_until > time.time():
+                        self.suspended_until[s_key] = s_until
+        except Exception as e:
+            logging.error(f"Error loading DB suspensions: {e}")
 
     def get_fresh_key(self) -> str | None:
         if not self.keys:
             return None
-
-        total_keys = len(self.keys)
-        attempts = 0
-
-        while attempts < total_keys:
-            candidate_key = self.keys[self.current_idx]
-            now = time.time()
-            time_since_last_use = now - self.last_used[candidate_key]
-            is_suspended = now < self.suspended_until[candidate_key]
-
-            # Si la llave ya se enfrió y no está suspendida por fallo previo
-            if time_since_last_use >= self.cooldown and not is_suspended:
-                self.last_used[candidate_key] = now
-                self.current_idx = (self.current_idx + 1) % total_keys
-                return candidate_key
-
-            # Si no está disponible, pasamos a la siguiente llave
-            self.current_idx = (self.current_idx + 1) % total_keys
-            attempts += 1
-
-        # Si llegamos aquí, significa que TODAS las llaves están en uso o suspendidas.
-        # Buscamos la que primero vaya a estar lista (entre cooldown o fin de suspensión)
-        best_key = None
-        min_wait = float("inf")
-
-        for key in self.keys:
-            wait_cooldown = self.cooldown - (time.time() - self.last_used[key])
-            wait_suspension = self.suspended_until[key] - time.time()
-            wait_needed = max(0, wait_cooldown, wait_suspension)
-            if wait_needed < min_wait:
-                min_wait = wait_needed
-                best_key = key
-
-        if min_wait > 0 and best_key:
-            # SOTA Intelligence: No dormimos más de 10s para evitar "congelar" el proceso.
-            # Es mejor dejar que el script falle y reintente después con una llave distinta.
-            wait_time = min(10.0, min_wait)
-            time.sleep(wait_time)
-
-        if best_key:
-            self.last_used[best_key] = time.time()
-            self.current_idx = (self.keys.index(best_key) + 1) % total_keys
-            return best_key
-        return None
-
-    def report_failure(self, key: str, duration: float = 300.0):
-        """Marca una llave como agotada (429) por un periodo determinado (5 min)."""
         now = time.time()
+
+        def _wait_needed(key: str) -> float:
+            return max(
+                0.0,
+                self.cooldown - (now - self.last_used[key]),
+                self.suspended_until[key] - now,
+            )
+
+        ready = [k for k in self.keys if _wait_needed(k) == 0.0]
+        if ready:
+            key = ready[self.current_idx % len(ready)]
+            self.last_used[key] = now
+            self.current_idx = (self.current_idx + 1) % len(self.keys)
+            return key
+
+        best_key = min(self.keys, key=_wait_needed)
+        wait_time = min(10.0, _wait_needed(best_key))
+        time.sleep(wait_time)
+
+        self.last_used[best_key] = time.time()
+        self.current_idx = (self.keys.index(best_key) + 1) % len(self.keys)
+        return best_key
+
+    def report_failure(self, key: str, error_msg: str = ""):
+        now = time.time()
+        error_lower = error_msg.lower()
+
+        if "quota" in error_lower or "exhausted" in error_lower or "daily" in error_lower:
+            duration = 86400.0
+            logging.warning("🔴 [KeyManager] Daily quota exhausted. Key suspended for 24h.")
+        else:
+            duration = 300.0
+            logging.warning("🟡 [KeyManager] Temporary saturation (503/RPM). Key suspended for 5m.")
+
         if key in self.suspended_until:
-            self.suspended_until[key] = now + duration
+            suspend_time = now + duration
+            self.suspended_until[key] = suspend_time
             self.recent_failures.append(now)
 
-            # Limpiar historial de fallos anticuado (> 60s)
-            self.recent_failures = [f for f in self.recent_failures if now - f < 60]
+            if self.db_path:
+                with self._db_lock:
+                    try:
+                        conn = self._get_db()
+                        conn.execute(
+                            "INSERT OR REPLACE INTO key_suspensions "
+                            "(api_key, suspended_until) VALUES (?, ?)",
+                            (key, suspend_time),
+                        )
+                        conn.commit()
+                    except Exception as e:
+                        logging.error(f"Error saving suspension to DB: {e}")
 
-            # Si detectamos más de 5 fallos en 60s, aplicamos un "Goteo Forzoso" (Global Backoff)
+            self.recent_failures = [f for f in self.recent_failures if now - f < 60]
             if len(self.recent_failures) > 5:
-                # print("   🚨 [REGIONAL QUOTA] Congestión detectada. Aplicando retardo global SOTA...")
-                time.sleep(10)  # Pausa estratégica para que la región respire
+                logging.warning(
+                    "🛑 [KeyManager] Multiple failures detected. Tactical 15s pause "
+                    "to prevent IP ban."
+                )
+                time.sleep(15)
+
+    def get_status(self) -> dict[str, Any]:
+        """Returns health status of the key manager."""
+        now = time.time()
+        active_keys = [k for k, t in self.suspended_until.items() if t <= now]
+        suspended_keys = [k for k, t in self.suspended_until.items() if t > now]
+        return {
+            "total_keys": len(self.keys),
+            "active_keys": len(active_keys),
+            "suspended_keys": len(suspended_keys),
+            "recent_failures": len(self.recent_failures),
+            "health": "OK" if active_keys else "CRITICAL",
+        }
+
+
+class CircuitState(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+@dataclass
+class CircuitBreaker:
+    """Per-provider circuit breaker with zero blocking."""
+
+    failure_threshold: int = 3
+    recovery_timeout: float = 30.0
+    state: CircuitState = CircuitState.CLOSED
+    failure_count: int = 0
+    last_failure_time: float = 0.0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def can_execute(self) -> bool:
+        with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+            if self.state == CircuitState.OPEN:
+                if time.time() - self.last_failure_time > self.recovery_timeout:
+                    self.state = CircuitState.HALF_OPEN
+                    return True
+                return False
+            return True
+
+    def record_success(self) -> None:
+        with self._lock:
+            self.failure_count = 0
+            self.state = CircuitState.CLOSED
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            if self.failure_count >= self.failure_threshold:
+                self.state = CircuitState.OPEN
 
 
 class VromlixOrchestrator:
+    _ROLE_ALIASES: ClassVar[dict[str, str]] = {
+        "PRIME": "PRECISION",
+        "CONSULTA": "VOLUMEN",
+        "REASONING": "PRECISION",
+        "INDEXER": "VOLUMEN",
+    }
+
     def __init__(self):
-        # 1. Tri-State Detection
         self.is_colab = "google.colab" in sys.modules
         self.is_firebase = (
             "FIREBASE_CONFIG" in os.environ
@@ -335,160 +384,207 @@ class VromlixOrchestrator:
             or "FUNCTION_NAME" in os.environ
         )
         self.is_local = (
-            not self.is_colab
-            and not self.is_firebase
-            and sys.platform.startswith("linux")
+            not self.is_colab and not self.is_firebase and sys.platform.startswith("linux")
         )
 
-        # 2. Base Paths
         if self.is_colab:
             self.base_path = Path("/content/drive/MyDrive/VROMLIX_CORE")
         elif self.is_local:
-            # Anclaje Absoluto SOTA: Intenta la ruta física, si falla usa detección dinámica (útil en CI)
-            prod_base = Path(
-                "/media/rogerman/14befb81-4210-4134-a9a0-0ee76166e483/VROMLIX_CORE"
-            )
-            if prod_base.exists():
-                self.base_path = prod_base
-            else:
-                # Fallback para CI/GitHub Actions: asumimos estructura de repos hermanos
-                self.base_path = Path(__file__).resolve().parents[1] / "VROMLIX_CORE"
+            self.base_path = Path(__file__).resolve().parent
         else:
             self.base_path = Path("/tmp/VROMLIX_CORE")
 
-        # 3. REGISTRO CENTRAL DE RUTAS
         self.paths = self._init_paths()
-
-        # 4. Config Loading
         self.config_path = self._get_config_path()
         self.config = self._load_config()
 
-        # 5. API Rotation SOTA (NUEVO)
         keys_list = getattr(self.config, "LISTA_DE_APIS", [])
-        self.key_manager = ActiveKeyManager(keys_list, cooldown_seconds=61.0)
+        api_db_path = str(self.paths.databases / "vromlix_api_manager.sqlite")
+        self.key_manager = ActiveKeyManager(keys_list, cooldown_seconds=61.0, db_path=api_db_path)
+
+        # NUEVO: Rotador SOTA para tus 6 cuentas de Groq
+        groq_keys_list = getattr(self.config, "LISTA_GROQ", [])
+        self.groq_key_manager = None
+        if groq_keys_list:
+            groq_db_path = str(self.paths.databases / "groq_api_manager.sqlite")
+            self.groq_key_manager = ActiveKeyManager(
+                groq_keys_list, cooldown_seconds=61.0, db_path=groq_db_path
+            )
+
+        self._model_cache = {}
+        self._circuit_breakers: dict[str, CircuitBreaker] = {}
+
+        # SOTA LOCAL EMBEDDER (Dinámico desde Config)
+        self._local_embedder = None
+        try:
+            from llama_cpp import Llama
+
+            embed_config = getattr(self.config, "MODEL_ROUTING_REGISTRY", {}).get("EMBEDDINGS", {})
+            model_name = (
+                embed_config.get("primary")
+                if embed_config.get("provider") == "local_llama_cpp"
+                else embed_config.get("fallback")
+            )
+            if not model_name:
+                model_name = "v5-nano-retrieval-Q8_0.gguf"
+
+            model_path = self.paths.local_llms / model_name
+            if not model_path.exists():
+                model_path = self.base_path / "models" / model_name
+
+            if model_path.exists():
+                logging.debug("🚀 [SOTA] Initializing Jina v5 Nano via llama.cpp...")
+                self._local_embedder = Llama(
+                    model_path=str(model_path),
+                    embedding=True,
+                    n_ctx=8192,
+                    verbose=False,
+                )
+        except ImportError:
+            logging.debug(
+                "⚙️ llama-cpp-python no disponible. Si se usa Jina local, el pipeline fallará."
+            )
 
     def _init_paths(self):
         class Paths:
-            base = self.base_path
-            sandbox = self.base_path / "00_sandbox"
-            config = self.base_path / "01_config"
-            config_xml = self.base_path / "01_config/xml"
-            config_json = self.base_path / "01_config/json"
-            active_memory = self.base_path / "02_active_memory"
-            prompts = self.base_path / "03_prompts"
-            scripts = self.base_path / "04_scripts"
-            docs = self.base_path / "05_docs"
-            databases = self.base_path / "06_databases"
-            projects = self.base_path / "07_projects"
-            tests = self.base_path / "08_tests"
-            shell_scripts = self.base_path / "09_shell_scripts"
-            deep_storage = self.base_path / "99_deep_storage"
+            def __init__(self, base_path):
+                self.base = Path(base_path).resolve()
+                self.sandbox = self.base / "00_sandbox"
+                self.config = self.base / "01_config"
+                self.config_xml = self.base / "01_config/xml"
+                self.config_json = self.base / "01_config/json"
+                self.scripts = self.base / "04_scripts"
+                self.docs = self.base / "05_docs"
 
-            # --- PROYECTOS CENTRALIZADOS ---
-            apeiron = self.base_path / "07_projects/01_Apeiron"
-            icatmor = self.base_path / "07_projects/02_ICATMOR"
+                # SSoT: Centralized dynamic DB Path
+                db_env = os.environ.get("VROMLIX_DATA")
+                if db_env:
+                    self.databases = Path(db_env).resolve()
+                else:
+                    self.databases = self.base.parent / "VROMLIX_DATA"
 
-            local_llms = Path(
-                "/media/rogerman/14befb81-4210-4134-a9a0-0ee76166e483/Local_LLMs"
-            )
-            if not local_llms.exists():
-                local_llms = self.base_path.parent / "Local_LLMs"
+                self.projects = self.base / "07_projects"
+                self.tests = self.base / "08_tests"
+                self.shell_scripts = self.base / "09_shell_scripts"
+                self.deep_storage = self.base / "99_deep_storage"
+                self.apeiron = self.base / "07_projects/01_Apeiron"
+                self.icatmor = self.base / "07_projects/02_ICATMOR"
 
-            # --- REPOSITORIOS EXTERNOS CENTRALIZADOS (Solo los activos) ---
-            repos_externos = [
-                self.base_path.parent / "cv",
-                self.base_path.parent / "blueprints",
-                self.base_path.parent / "rlozano.intel",
-                self.base_path.parent / "vromlix-cognitive-architecture",
-            ]
+                # Local LLMs definition
+                llm_env = os.environ.get("VROMLIX_LOCAL_LLMS")
+                if llm_env:
+                    self.local_llms = Path(llm_env).resolve()
+                else:
+                    self.local_llms = self.base.parent / "Local_LLMs"
+                    if not self.local_llms.exists():
+                        self.local_llms = self.base / "models"
 
-        # Asegurar que SANDBOX siempre exista
-        Paths.sandbox.mkdir(parents=True, exist_ok=True)
-        return Paths()
+                self.repos_externos = [
+                    self.base.parent / "cv",
+                    self.base.parent / "blueprints",
+                    self.base.parent / "rlozano.intel",
+                    self.base.parent / "vromlix-cognitive-architecture",
+                ]
+
+        paths = Paths(self.base_path)
+        paths.sandbox.mkdir(parents=True, exist_ok=True)
+        return paths
 
     def _get_config_path(self):
         if self.is_colab:
-            from google.colab import drive
+            import importlib
 
-            if not os.path.exists("/content/drive"):
-                drive.mount("/content/drive")
+            colab_drive = importlib.import_module("google.colab").drive
+            if not Path("/content/drive").exists():
+                colab_drive.mount("/content/drive")
             return "/content/drive/MyDrive/Colab Notebooks/config_api_keys_secrets.py"
         elif self.is_local:
-            # --- MODIFICADO: Ahora apunta a la carpeta oculta .secrets ---
             return str(self.paths.base / ".secrets" / "config_api_keys_secrets.py")
         return "./.secrets/config_api_keys_secrets.py"
 
     def _load_config(self):
-        if not os.path.exists(self.config_path):
-            logging.warning(
-                f"AVISO: No se encontró config en {self.config_path}. Usando defaults."
-            )
+        if not Path(self.config_path).exists():
+            logging.warning(f"WARNING: No config found at {self.config_path}. Using defaults.")
             return None
         spec = importlib.util.spec_from_file_location("config_module", self.config_path)
-        if spec is None:
+        if spec is None or spec.loader is None:
             return None
-
-        if spec.loader is None:
-            logging.warning(
-                f"AVISO: No se pudo crear el spec de carga para {self.config_path}."
-            )
-            return None
-
         config = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(config)
         return config
 
-    def get_model(self, role):
-        # Mapeo SOTA: Roles abstractos a llaves del registro
-        role_map = {
-            "PRIME": "PRECISION",
-            "CONSULTA": "VOLUMEN",
-            "REASONING": "PRECISION",
-            "INDEXER": "VOLUMEN",
-        }
-        normalized_role = role_map.get(role.upper(), role.upper())
+    def get_model(self, role: str) -> str:
+        normalized_role = self._ROLE_ALIASES.get(role.upper(), role.upper())
+        cache_key = f"model_{normalized_role}"
+        if cache_key in self._model_cache:
+            return self._model_cache[cache_key]
 
-        # Fallback si no hay config pero se pide un rol estándar para evitar crashes
-        if not self.config and normalized_role in [
-            "VOLUMEN",
-            "PRECISION",
-            "MASIVO",
-        ]:
-            return "gemini-3.1-flash-lite-preview"
+        if not self.config and normalized_role in ["VOLUMEN", "PRECISION", "MASIVO"]:
+            model = "gemini-3.1-flash-lite-preview"
+            self._model_cache[cache_key] = model
+            return model
 
-        # NUEVA LÓGICA PRINCIPAL: Leer desde el registro de enrutamiento (SOTA)
         try:
             registry = getattr(self.config, "MODEL_ROUTING_REGISTRY", {})
             if normalized_role in registry:
-                return registry[normalized_role]["model_id"]
+                model_config = registry[normalized_role]
+                _m: str | None = model_config.get("primary", model_config.get("model_id"))
+                if _m:
+                    self._model_cache[cache_key] = _m
+                    return _m
         except Exception as e:
-            logging.warning(f"Error leyendo MODEL_ROUTING_REGISTRY: {e}")
+            logging.warning(f"Error reading MODEL_ROUTING_REGISTRY: {e}")
 
-        # LÓGICA LEGACY (Mantener por retrocompatibilidad)
         attr_name = f"MODELO_{normalized_role}"
-        model = getattr(self.config, attr_name, None)
-        if not model:
-            # Reintentar con el rol original si no hubo mapeo útil
-            attr_name_orig = f"MODELO_{role.upper()}"
-            model = getattr(self.config, attr_name_orig, None)
+        _m2: str | None = getattr(self.config, attr_name, None)
+        if not _m2:
+            _m2 = getattr(self.config, f"MODELO_{role.upper()}", None)
 
-        if not model:
-            raise ValueError(
-                f"HARD STOP: El modelo para el rol '{role}' (mapeado a '{normalized_role}') no está definido."
-            )
-        return model
+        if not _m2:
+            raise ValueError(f"HARD STOP: Model for role '{role}' is not defined.")
 
-    def get_api_key(self):
-        """Retorna una llave garantizada como fresca (fuera del cooldown)."""
+        self._model_cache[cache_key] = _m2
+        return _m2
+
+    def get_model_capabilities(self, role):
+        try:
+            registry = getattr(self.config, "MODEL_ROUTING_REGISTRY", {})
+            normalized_role = self._ROLE_ALIASES.get(role.upper(), role.upper())
+            if normalized_role in registry:
+                config = registry[normalized_role]
+                return {
+                    "model_id": config.get("primary", config.get("model_id")),
+                    "provider": config.get("provider", "google"),
+                    "fallback": config.get("fallback"),
+                    "fallback_provider": config.get("fallback_provider", "google"),
+                    "fallback_2": config.get("fallback_2"),
+                    "fallback_2_provider": config.get("fallback_2_provider", "github"),
+                    "fallback_3": config.get("fallback_3"),
+                    "fallback_3_provider": config.get("fallback_3_provider", "local_llama_cpp"),
+                    "role": config.get("role"),
+                    "cost_tier": config.get("cost_tier"),
+                    "capability": config.get("capability"),
+                    "rpd_per_key": config.get("rpd_per_key"),
+                    "rpm_per_key": config.get("rpm_per_key"),
+                    "tpm_limit": config.get("tpm_limit"),
+                }
+        except Exception as e:
+            logging.warning(f"Error getting model capabilities: {e}")
+        return None
+
+    def get_api_key(self, provider: str = "gemini"):
+        if provider.lower() == "groq" and self.groq_key_manager:
+            return self.groq_key_manager.get_fresh_key()
         return self.key_manager.get_fresh_key()
 
-    def report_exhaustion(self, key: str):
-        """Informa al gestor que una llave ha devuelto un error 429."""
-        self.key_manager.report_failure(key)
+    def report_exhaustion(self, key: str, provider: str = "gemini", error_msg: str = ""):
+        if provider.lower() == "groq" and self.groq_key_manager:
+            self.groq_key_manager.report_failure(key, error_msg=error_msg)
+        else:
+            self.key_manager.report_failure(key, error_msg=error_msg)
 
     def get_secret(self, key_name: str):
         try:
-            # Lógica de rotación SOTA para llaves de Gemini
             if key_name == "GEMINI_API_KEY" and hasattr(self, "key_manager"):
                 fresh_key = self.key_manager.get_fresh_key()
                 if fresh_key:
@@ -497,17 +593,13 @@ class VromlixOrchestrator:
             registry = getattr(self.config, "MODEL_ROUTING_REGISTRY", {})
             if key_name in registry:
                 return registry[key_name]
-
-            # --- NUEVA LÍNEA: Buscar como variable global directa ---
             if hasattr(self.config, key_name):
                 return getattr(self.config, key_name)
-
             return getattr(self.config, "SECRETS", {}).get(key_name)
         except Exception:
             return None
 
     def get_safety_settings(self) -> list[Any]:
-        """Devuelve la configuración global de seguridad SOTA para la API v3."""
         try:
             return [
                 types.SafetySetting(
@@ -524,11 +616,6 @@ class VromlixOrchestrator:
         except ImportError:
             return []
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-    )
     def query_local_ollm(
         self,
         model_name: str,
@@ -536,40 +623,385 @@ class VromlixOrchestrator:
         user_prompt: str,
         temperature: float = 0.1,
     ) -> str:
-        """Centraliza las peticiones a la API local de Ollama para cualquier script con Resiliencia SOTA."""
-        payload = {
-            "model": model_name,
-            "messages": [
+        """SOTA Bare-Metal Execution (No Ollama). Locks RAM to prevent swap thrashing."""
+        if not hasattr(self, "_local_llm") or getattr(self, "_local_llm_name", "") != model_name:
+            try:
+                from llama_cpp import Llama
+
+                model_path = self.paths.local_llms / model_name
+                if not model_path.exists():
+                    raise FileNotFoundError(f"Local model not found: {model_path}")
+
+                logging.info(f"🚀 [EDGE COMPUTE] Loading {model_name} directly into RAM...")
+                self._local_llm = Llama(
+                    model_path=str(model_path),
+                    n_ctx=4096,
+                    n_threads=4,  # Optimizado para P-Cores de i5
+                    use_mlock=True,  # CRÍTICO: Evita que Ubuntu use el disco duro (Swap)
+                    verbose=False,
+                )
+                self._local_llm_name = model_name
+            except ImportError as e:
+                raise RuntimeError("llama-cpp-python is required for bare-metal execution.") from e
+
+        # Forzar modo determinista si es Qwen
+        if "qwen" in model_name.lower():
+            system_prompt += (
+                "\nCRITICAL: Output ONLY valid JSON or direct answers. "
+                "NO chain-of-thought. NO <think> tags."
+            )
+
+        response = self._local_llm.create_chat_completion(
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "stream": False,
-            "options": {"temperature": temperature},
-        }
-        # Timeout de 120s por si el modelo está "frío" y tarda en cargar a RAM
-        with httpx.Client(timeout=120.0) as client:
-            response = client.post("http://localhost:11434/api/chat", json=payload)
-            response.raise_for_status()
-            return response.json().get("message", {}).get("content", "").strip()
+            temperature=temperature,
+            max_tokens=1024,
+        )
+        return response["choices"][0]["message"]["content"].strip()
+
+    def get_embeddings(self, text: str, role: str = "EMBEDDINGS") -> list[float]:
+        info = self.get_model_capabilities(role)
+        providers = []
+        if info and info.get("model_id"):
+            providers.append({"id": info.get("provider"), "model": info.get("model_id")})
+        if info and info.get("fallback"):
+            providers.append({"id": info.get("fallback_provider"), "model": info.get("fallback")})
+
+        for prov in providers:
+            if prov["id"] == "local_llama_cpp":
+                if hasattr(self, "_local_embedder") and self._local_embedder:
+                    import os
+                    import sys
+
+                    fd = sys.stderr.fileno()
+                    old_stderr = os.dup(fd)
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull, fd)
+                    try:
+                        from typing import cast
+
+                        response = self._local_embedder.create_embedding(text)
+                        return cast(list[float], response["data"][0]["embedding"])
+                    except Exception as e:
+                        os.dup2(old_stderr, fd)
+                        logging.error(f"[EMBEDDINGS] Error en Jina Local: {e}")
+                        continue  # Intenta el fallback
+                    finally:
+                        os.dup2(old_stderr, fd)
+                        os.close(devnull)
+                        os.close(old_stderr)
+
+            elif prov["id"] == "google":
+                try:
+                    api_key = self.get_api_key(provider="gemini")
+                    client = genai.Client(api_key=api_key)
+                    res = client.models.embed_content(model=prov["model"], contents=text)
+                    return res.embeddings[0].values
+                except Exception as e:
+                    logging.error(f"[EMBEDDINGS] Error en Gemini: {e}")
+                    continue
+
+        raise RuntimeError("⚠️ HARD STOP: Todos los proveedores de Embeddings fallaron.")
+
+    def query_universal_llm(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        role: str = "VOLUMEN",
+        response_model: Any = None,
+        tools: list | None = None,
+        thinking: bool = False,
+    ) -> Any:
+        """Universal Bridge SOTA v4.0: 4-Level Waterfall (Groq -> Gemini -> GitHub -> Local)."""
+        info = self.get_model_capabilities(role)
+        if not info:
+            return VromlixResponse("ERROR: Role not configured.")
+
+        # Construcción dinámica de la cascada de resiliencia
+        providers = []
+        if info.get("model_id"):
+            providers.append({"id": info.get("provider", "google"), "model": info.get("model_id")})
+        if info.get("fallback"):
+            providers.append(
+                {"id": info.get("fallback_provider", "google"), "model": info.get("fallback")}
+            )
+        if info.get("fallback_2"):
+            providers.append(
+                {"id": info.get("fallback_2_provider", "github"), "model": info.get("fallback_2")}
+            )
+        if info.get("fallback_3"):
+            providers.append(
+                {
+                    "id": info.get("fallback_3_provider", "local_llama_cpp"),
+                    "model": info.get("fallback_3"),
+                }
+            )
+
+        last_error = None
+        for prov in providers:
+            if not prov["model"]:
+                continue
+
+            cb = self._circuit_breakers.setdefault(prov["id"], CircuitBreaker())
+            if not cb.can_execute():
+                logging.warning(f"⚡ Circuit OPEN for {prov['id']}. Skipping to next fallback.")
+                continue
+
+            try:
+                match prov["id"]:
+                    case "groq":
+                        api_key = self.get_api_key(provider="groq")
+                        if not api_key:
+                            continue
+                        client_groq = OpenAI(
+                            base_url="https://api.groq.com/openai/v1", api_key=api_key
+                        )
+
+                        if response_model:
+                            instr_groq = instructor.from_openai(
+                                client_groq, mode=instructor.Mode.JSON
+                            )
+                            res = instr_groq.chat.completions.create(
+                                model=prov["model"],
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt},
+                                ],
+                                response_model=response_model,
+                            )
+                            cb.record_success()
+                            return res
+
+                        resp_groq = client_groq.chat.completions.create(
+                            model=prov["model"],
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            temperature=0.1,
+                        )
+                        text = resp_groq.choices[0].message.content or ""
+                        _usage = resp_groq.usage
+                        usage = VromlixUsage(
+                            _usage.prompt_tokens if _usage else 0,
+                            _usage.completion_tokens if _usage else 0,
+                        )
+                        cb.record_success()
+                        return VromlixResponse(text, "", usage)
+
+                    case "google":
+                        api_key = self.get_api_key(provider="gemini")
+                        if not api_key:
+                            continue
+                        client = genai.Client(
+                            api_key=api_key,
+                            http_options=types.HttpOptions(api_version="v1alpha"),
+                        )
+
+                        if response_model:
+                            instr = instructor.from_genai(
+                                client, mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS
+                            )
+                            res = instr.chat.completions.create(
+                                model=prov["model"],
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt},
+                                ],
+                                response_model=response_model,
+                            )
+                            cb.record_success()
+                            return res
+
+                        resp = client.models.generate_content(
+                            model=prov["model"],
+                            contents=user_prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_prompt,
+                                temperature=0.2,
+                                tools=tools,
+                                thinking_config=(
+                                    types.ThinkingConfig(include_thoughts=True)
+                                    if thinking
+                                    else None
+                                ),
+                            ),
+                        )
+                        text, thoughts = "", ""
+                        candidate = resp.candidates[0] if resp.candidates else None
+                        if candidate and candidate.content and candidate.content.parts:
+                            for part in candidate.content.parts:
+                                part_text: str = part.text or ""
+                                if getattr(part, "thought", False):
+                                    thoughts += part_text
+                                elif part_text:
+                                    text += part_text
+                        cb.record_success()
+                        return VromlixResponse(
+                            text or (resp.text or ""), thoughts, resp.usage_metadata
+                        )
+
+                    case "github":
+                        token = self.get_secret("GITHUB_TOKEN")
+                        if not token:
+                            continue
+                        client_gh = OpenAI(
+                            base_url="https://models.inference.ai.azure.com", api_key=token
+                        )
+                        final_user = (
+                            f"[SYSTEM: Think step by step]\n{user_prompt}"
+                            if thinking
+                            else user_prompt
+                        )
+
+                        if response_model:
+                            instr_gh = instructor.from_openai(client_gh)
+                            res = instr_gh.chat.completions.create(
+                                model=prov["model"],
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": final_user},
+                                ],
+                                response_model=response_model,
+                            )
+                            cb.record_success()
+                            return res
+
+                        resp_gh = client_gh.chat.completions.create(
+                            model=prov["model"],
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": final_user},
+                            ],
+                            temperature=0.1,
+                        )
+                        raw_text: str = resp_gh.choices[0].message.content or ""
+                        thoughts_match = re.search(r"<thought>(.*?)</thought>", raw_text, re.DOTALL)
+                        clean_text = re.sub(
+                            r"<thought>.*?</thought>", "", raw_text, flags=re.DOTALL
+                        ).strip()
+                        final_thoughts = (
+                            thoughts_match.group(1).strip()
+                            if thoughts_match
+                            else (f"Rescue via {prov['id'].upper()}..." if thinking else "")
+                        )
+                        _usage = resp_gh.usage
+                        usage = VromlixUsage(
+                            _usage.prompt_tokens if _usage else 0,
+                            _usage.completion_tokens if _usage else 0,
+                        )
+                        cb.record_success()
+                        return VromlixResponse(clean_text, final_thoughts, usage)
+
+                    case "local_llama_cpp":
+                        # Fallback 3: Supervivencia Zero-Internet
+                        logging.warning(
+                            f"🛡️ Activando Fallback Local (Zero-Internet): {prov['model']}"
+                        )
+                        text = self.query_local_ollm(
+                            model_name=prov["model"],
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                        )
+
+                        # Si se requiere JSON, intentamos parsearlo rudimentariamente
+                        if response_model:
+                            try:
+                                import json
+
+                                # Buscar el primer bloque JSON en la respuesta
+                                json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                                if json_match:
+                                    parsed = json.loads(json_match.group(0))
+                                    return response_model(**parsed)
+                            except Exception as e:
+                                logging.error(f"Local JSON parse failed: {e}")
+                                raise ValueError(
+                                    "Local model failed to produce valid JSON schema."
+                                ) from e
+
+                        cb.record_success()
+                        return VromlixResponse(text, "", None)
+
+            except Exception as e:
+                last_error = str(e)
+                cb.record_failure()
+
+                # Manejo SOTA de Error 429 (Exponential Backoff para Groq y Gemini)
+                if any(
+                    err in last_error.lower()
+                    for err in ["429", "quota", "503", "overloaded", "rate_limit"]
+                ):
+                    wait_time = 60.0
+                    if prov["id"] == "groq" and hasattr(e, "response") and e.response is not None:
+                        wait_time = float(e.response.headers.get("retry-after", 60.0))
+
+                    logging.warning(
+                        f"⏳ {prov['id'].upper()} Rate Limit (429). "
+                        f"Pausando {wait_time}s antes de rotar..."
+                    )
+                    time.sleep(wait_time)
+
+                    if prov["id"] in ["google", "groq"]:
+                        self.report_exhaustion(api_key, provider=prov["id"], error_msg=last_error)
+                    continue
+
+                logging.error(f"❌ Error en {prov['id']}: {last_error}")
+                continue  # Intenta el siguiente fallback
+
+        return VromlixResponse(f"CRITICAL ERROR: All 4 providers failed. Last error: {last_error}")
+
+    def update_knowledge_base(self, source_folder_name: str, db_filename: str):
+        """
+        Orchestrator Command: Orders the Universal Indexer to vectorize a specific folder.
+        Example: update_knowledge_base("02_projects", "projects_index.sqlite")
+        """
+        import subprocess
+
+        indexer_script = self.paths.scripts / "core" / "core_knowledge_indexer.py"
+
+        # Si le pasan la raíz vacía, escanea VROMLIX_CORE
+        if source_folder_name == "" or source_folder_name == ".":
+            source_path = self.paths.base
+        else:
+            source_path = self.paths.base / source_folder_name
+
+        logging.info(f"📢 [Orchestrator] Ordering Indexer: {source_path.name} -> {db_filename}")
+
+        cmd = [
+            "uv",
+            "run",
+            str(indexer_script),
+            "--source",
+            str(source_path),
+            "--db",
+            db_filename,
+        ]
+
+        try:
+            subprocess.run(cmd, check=True)
+            logging.debug(f"✅ [Orchestrator] Indexing completed for {db_filename}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"❌ [Orchestrator] Indexer failed for {db_filename}: {e}")
 
 
-# Instancia única global
 vromlix = VromlixOrchestrator()
 
 
 class IOManager:
     @staticmethod
-    def select_file(
-        provided_path: str | None = None, title: str = "Selecciona un archivo"
-    ) -> str | None:
-        if provided_path and os.path.exists(provided_path):
+    def select_file(provided_path: str | None = None, title: str = "Select a file") -> str | None:
+        if provided_path and Path(provided_path).exists():
             return provided_path
         if vromlix.is_colab:
-            from google.colab import files
+            import importlib
 
+            colab_files = importlib.import_module("google.colab").files
             print(f"📂 {title}:")
-            uploaded = files.upload()
-            return list(uploaded.keys())[0] if uploaded else None
+            uploaded = colab_files.upload()
+            return next(iter(uploaded.keys())) if uploaded else None
         elif vromlix.is_local:
             import tkinter as tk
             from tkinter import filedialog
@@ -580,14 +1012,15 @@ class IOManager:
             return file_path if file_path else None
         else:
             file_path = input(f"📂 {title}: ").strip()
-            return file_path if os.path.exists(file_path) else None
+            return file_path if Path(file_path).exists() else None
 
     @staticmethod
-    def select_files(title: str = "Selecciona archivos") -> list[str]:
+    def select_files(title: str = "Select files") -> list[str]:
         if vromlix.is_colab:
-            from google.colab import files
+            import importlib
 
-            uploaded = files.upload()
+            colab_files = importlib.import_module("google.colab").files
+            uploaded = colab_files.upload()
             return list(uploaded.keys()) if uploaded else []
         elif vromlix.is_local:
             import tkinter as tk
@@ -598,23 +1031,24 @@ class IOManager:
             file_paths = filedialog.askopenfilenames(title=title)
             return list(file_paths) if file_paths else []
         else:
-            paths = input(f"📂 {title} (separadas por coma): ")
-            return [p.strip() for p in paths.split(",") if os.path.exists(p.strip())]
+            paths = input(f"📂 {title} (comma separated): ")
+            return [p.strip() for p in paths.split(",") if Path(p.strip().exists())]
 
     @staticmethod
     def export_file(file_path: str):
         if vromlix.is_colab:
-            from google.colab import files
+            import importlib
 
-            files.download(file_path)
+            colab_files = importlib.import_module("google.colab").files
+            colab_files.download(file_path)
         else:
-            print(f"✅ Archivo guardado en: {os.path.abspath(file_path)}")
+            logging.info(f"✅ File saved: {Path(file_path).name}")
 
     @staticmethod
-    def select_directory(title: str = "Selecciona un directorio") -> str | None:
+    def select_directory(title: str = "Select a directory") -> str | None:
         if vromlix.is_colab:
-            dir_path = input(f"📂 {title} en Colab: ").strip()
-            return dir_path if os.path.exists(dir_path) else None
+            dir_path = input(f"📂 {title} in Colab: ").strip()
+            return dir_path if Path(dir_path).exists() else None
         elif vromlix.is_local:
             import tkinter as tk
             from tkinter import filedialog
@@ -625,10 +1059,7 @@ class IOManager:
             return dir_path if dir_path else None
         else:
             dir_path = input(f"📂 {title}: ").strip()
-            return dir_path if os.path.exists(dir_path) else None
-
-
-# --- RAPTOR CONSOLIDATION LOGIC (RELOCATED SOTA) ---
+            return dir_path if Path(dir_path).exists() else None
 
 
 class RaptorSummaryNode(BaseModel):
@@ -636,26 +1067,25 @@ class RaptorSummaryNode(BaseModel):
         description="A concise, 3-to-5 word technical title for the cluster."
     )
     comprehensive_summary: str = Field(
-        description="SOTA Brevity: A high-density summary (max 3 sentences) synthesizing the core technical concepts."
+        description=(
+            "SOTA Brevity: A high-density summary (max 3 sentences) "
+            "synthesizing the core technical concepts."
+        )
     )
-    extracted_entities: List[str] = Field(
+    extracted_entities: list[str] = Field(
         description="Exhaustive array containing vital proper nouns, algorithms, or metrics."
     )
-    critical_claims: List[str] = Field(
+    critical_claims: list[str] = Field(
         description="Exact, definitive assertions or factual declarations sourced directly."
     )
-    contradictions_or_gaps: Optional[str] = Field(
+    contradictions_or_gaps: str | None = Field(
         description="Note any direct contradictions, or null if none exist."
     )
 
 
 class VromlixRaptorEngine:
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        if not db_path:
-            db_path = str(vromlix.paths.vector_db / "vromlix_memory.sqlite")
-
-        self.db_path = db_path
-        # Import sqlite_vec inside to avoid dependency issues in non-vector contexts
+    def __init__(self, db_path: str | None = None) -> None:
+        self.db_path = db_path or str(vromlix.paths.databases / "vromlix_memory.sqlite")
         try:
             import sqlite_vec
 
@@ -671,13 +1101,11 @@ class VromlixRaptorEngine:
         return conn
 
     def reset_hierarchy(self):
-        """Elimina toda la jerarquía anterior para forzar una re-consolidación global SOTA."""
+        """Delete entire previous hierarchy to force global SOTA re-consolidation."""
         conn = self._get_connection()
-        cursor = conn.cursor()
         try:
-            cursor.execute(
-                "DELETE FROM vromlix_metadata WHERE chunk_type = 'summary_node'"
-            )
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM vromlix_metadata WHERE chunk_type = 'summary_node'")
             cursor.execute("UPDATE vromlix_metadata SET parent_id = NULL")
             cursor.execute(
                 "DELETE FROM vromlix_vectors WHERE id NOT IN (SELECT id FROM vromlix_metadata)"
@@ -688,8 +1116,8 @@ class VromlixRaptorEngine:
 
     def get_unconsolidated_leaves(self, target_level: int = 0) -> list:
         conn = self._get_connection()
-        cursor = conn.cursor()
         try:
+            cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT m.id, m.content, v.embedding
@@ -703,17 +1131,12 @@ class VromlixRaptorEngine:
         finally:
             conn.close()
 
-    def determine_optimal_clusters(
-        self, embeddings_matrix: np.ndarray, max_k: int = 50
-    ) -> tuple:
-        # Importación perezosa SOTA: Solo si se requiere clusterización
+    def determine_optimal_clusters(self, embeddings_matrix: np.ndarray, max_k: int = 50) -> tuple:
         try:
-            import umap  # type: ignore
-            from sklearn.mixture import GaussianMixture  # type: ignore
+            import umap
+            from sklearn.mixture import GaussianMixture
         except ImportError:
-            logging.error(
-                "❌ [RAPTOR] Error: 'umap-learn' o 'scikit-learn' no instalados. Instálalos para usar consolidación."
-            )
+            logging.error("❌ [RAPTOR] Error: 'umap-learn' or 'scikit-learn' not installed.")
             return (None, None)
 
         N = len(embeddings_matrix)
@@ -721,67 +1144,58 @@ class VromlixRaptorEngine:
             return (1, np.zeros(N, dtype=int)) if N > 0 else (None, None)
 
         reducer = umap.UMAP(
-            n_components=min(10, N - 1),
-            n_neighbors=min(15, N - 1),
-            random_state=42,
+            n_components=min(10, N - 1), n_neighbors=min(15, N - 1), random_state=42
         )
-        reduced_embeddings = reducer.fit_transform(embeddings_matrix)
-        reduced_embeddings = np.float64(reduced_embeddings)
+        reduced_embeddings = np.float64(reducer.fit_transform(embeddings_matrix))
 
-        bics = []
-        max_possible_k = min(max_k, N // 2)
-        k_range = range(1, max_possible_k + 1)
-        models = []
+        bics, models = [], []
+        k_range = range(1, min(max_k, N // 2) + 1)
 
         for k in k_range:
             gmm = GaussianMixture(
-                n_components=k,
-                covariance_type="full",
-                random_state=42,
-                reg_covar=1e-4,
+                n_components=k, covariance_type="full", random_state=42, reg_covar=1e-4
             )
             gmm.fit(reduced_embeddings)
             bics.append(gmm.bic(reduced_embeddings))
             models.append(gmm)
 
         optimal_k_idx = np.argmin(bics)
-        optimal_gmm = models[optimal_k_idx]
-        optimal_k = k_range[optimal_k_idx]
-        return optimal_k, optimal_gmm.predict(reduced_embeddings)
+        return k_range[optimal_k_idx], models[optimal_k_idx].predict(reduced_embeddings)
 
     @retry(
-        stop=stop_after_attempt(20),
+        # Resistencia: El Router Universal ya maneja sus propios reintentos y pausas
+        stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
-    def generate_summary_node(self, chunks: List[str]) -> RaptorSummaryNode:
-        payload = "\n".join(
-            [f"CHUNK_{str(i + 1).zfill(2)}: {c}" for i, c in enumerate(chunks)]
+    def generate_summary_node(self, chunks: list[str]) -> RaptorSummaryNode:
+        payload = "\n".join([f"CHUNK_{str(i + 1).zfill(2)}: {c}" for i, c in enumerate(chunks)])
+
+        system_prompt = (
+            "You are an expert-level Knowledge Consolidation Engine (RAPTOR). "
+            "Synthesize this cluster into a BRIEF, high-density parent node. "
+            "CRITICAL: Use maximum 3 sentences for the comprehensive_summary."
         )
-        prompt = f"""
-        <system_directive>
-        You are an expert-level Knowledge Consolidation Engine (RAPTOR).
-        Synthesize this cluster into a BRIEF, high-density parent node. 
-        CRITICAL: Use maximum 3 sentences for the comprehensive_summary.
-        </system_directive>
-        <ingestion_payload>{payload}</ingestion_payload>
-        """
-        api_key = vromlix.get_api_key()
+        user_prompt = f"<ingestion_payload>\n{payload}\n</ingestion_payload>"
+
         try:
-            client = instructor.from_genai(
-                genai.Client(api_key=api_key),
-                mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS,
-            )
-            return client.chat.completions.create(
-                model=vromlix.get_model("VOLUMEN"),
-                messages=[{"role": "user", "content": prompt}],
+            # SOTA: Delegar al Router Universal (Groq -> Gemini -> GitHub -> Local)
+            response = vromlix.query_universal_llm(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                role="VOLUMEN",
                 response_model=RaptorSummaryNode,
-                max_retries=0,
             )
+
+            # Si todos los fallbacks fallaron, el router devuelve un VromlixResponse con el error
+            if isinstance(response, VromlixResponse) and "CRITICAL ERROR" in response.text:
+                raise RuntimeError(response.text)
+
+            # SOTA: 'response' ya es un objeto Pydantic validado por Instructor
+            return response
+
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                if api_key:
-                    vromlix.report_exhaustion(api_key)
+            logging.error(f"[RAPTOR] Error generating summary node: {e}")
             raise e
 
     @retry(
@@ -790,34 +1204,29 @@ class VromlixRaptorEngine:
         reraise=True,
     )
     def embed_and_store_parent(
-        self, summary_node: RaptorSummaryNode, child_ids: List[int], cluster_id: int
+        self, summary_node: RaptorSummaryNode, child_ids: list[int], cluster_id: int
     ):
-        summary_text = f"THEME: {summary_node.cluster_theme}\nSUMMARY: {summary_node.comprehensive_summary}\nENTITIES: {', '.join(summary_node.extracted_entities)}"
-        api_key = vromlix.get_api_key()
+        summary_text = (
+            f"THEME: {summary_node.cluster_theme}\n"
+            f"SUMMARY: {summary_node.comprehensive_summary}\n"
+            f"ENTITIES: {', '.join(summary_node.extracted_entities)}"
+        )
+
         try:
-            client = genai.Client(api_key=api_key)
-            response = client.models.embed_content(
-                model=vromlix.get_model("EMBEDDINGS"),
-                contents=summary_text,
-                config=types.EmbedContentConfig(
-                    task_type="RETRIEVAL_DOCUMENT", output_dimensionality=768
-                ),
-            )
+            # Usar el Dictador Local (Jina) a través de vromlix_utils
+            vector = vromlix.get_embeddings(summary_text, role="EMBEDDINGS")
+            if not vector:
+                raise ValueError("No embeddings returned from local engine")
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                if api_key:
-                    vromlix.report_exhaustion(api_key)
+            logging.error(f"Error generating embedding for RAPTOR node: {e}")
             raise e
 
-        if not response.embeddings:
-            raise ValueError("No embeddings returned")
-        vector = response.embeddings[0].values
-
         conn = self._get_connection()
-        cursor = conn.cursor()
         try:
+            cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO vromlix_metadata (source_file, chunk_type, content, tree_level, cluster_id) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO vromlix_metadata (source_file, chunk_type, content, "
+                "tree_level, cluster_id) VALUES (?, ?, ?, ?, ?)",
                 ("RAPTOR_CONSOLIDATION", "summary_node", summary_text, 1, cluster_id),
             )
             parent_id = cursor.lastrowid
@@ -838,36 +1247,37 @@ class VromlixRaptorEngine:
     def run_consolidation(self, force_full: bool = False) -> None:
         if force_full:
             self.reset_hierarchy()
-
         records = self.get_unconsolidated_leaves(target_level=0)
         if not records:
-            print("✅ No hay nodos huérfanos para consolidar.")
+            logging.info("✅ No orphan nodes to consolidate.")
             return
 
         ids = [int(r[0]) for r in records]
         texts = [str(r[1]) for r in records]
-        embeddings_list = [
-            np.frombuffer(r[2], dtype=np.float32)
-            if isinstance(r[2], bytes)
-            else json.loads(r[2])
-            for r in records
-        ]
-        embeddings = np.array(embeddings_list, dtype=np.float32)
+        embeddings = np.array(
+            [
+                np.frombuffer(r[2], dtype=np.float32)
+                if isinstance(r[2], bytes)
+                else json.loads(r[2])
+                for r in records
+            ],
+            dtype=np.float32,
+        )
 
         optimal_k, labels = self.determine_optimal_clusters(embeddings)
         if optimal_k is None:
             return
 
-        print(
-            f"🚀 Iniciando Consolidación Semántica ({optimal_k} nodos padre proyectados)..."
-        )
+        logging.debug(f"🚀 Starting Semantic Consolidation ({optimal_k} parent nodes projected)...")
         for cluster_id in range(optimal_k):
             cluster_indices = np.where(labels == cluster_id)[0]
-            cluster_texts = [texts[i] for i in cluster_indices][:20]
-            cluster_db_ids = [int(ids[i]) for i in cluster_indices]
+            cluster_indices_list = list(cluster_indices)
+            cluster_texts = [str(texts[int(i)]) for i in cluster_indices_list][:20]
+            cluster_db_ids = [int(ids[int(i)]) for i in cluster_indices_list]
 
             print(
-                f"\r   ⏳ Sintetizando: [{cluster_id + 1}/{optimal_k}] ({(cluster_id + 1) / optimal_k * 100:.1f}%) | Cluster: {cluster_id + 1}",
+                f"\r   ⏳ Synthesizing: [{cluster_id + 1}/{optimal_k}] "
+                f"({(cluster_id + 1) / optimal_k * 100:.1f}%) | Cluster: {cluster_id + 1}",
                 end="",
                 flush=True,
             )
@@ -877,10 +1287,42 @@ class VromlixRaptorEngine:
                     self.embed_and_store_parent(summary_obj, cluster_db_ids, cluster_id)
                 time.sleep(0.5)
             except Exception as e:
-                print(f"\n   ❌ Error en cluster {cluster_id + 1}: {str(e)[:100]}")
-        print("\n🎉 OPERACIÓN RAPTOR COMPLETADA. Memoria consolidada exitosamente.")
+                error_msg = str(e)
+                print(f"\n   ❌ Error in cluster {cluster_id + 1}: {error_msg[:100]}")
+        print("\n🎉 RAPTOR OPERATION COMPLETED. Memory successfully consolidated.")
 
 
-# Vromlix SOTA Sync Active
-# Vromlix SOTA Sync Active
-# Vromlix SOTA Recovery
+class ModelSelector:
+    """Intelligent Model Selection Layer for VROMLIX Orchestrator."""
+
+    def __init__(self, orchestrator: "VromlixOrchestrator"):
+        self.vromlix = orchestrator
+
+    def get_model_info(self, role: str) -> dict[str, Any] | None:
+        """Delegates to orchestrator capabilities."""
+        return self.vromlix.get_model_capabilities(role)
+
+    def get_model_with_fallback(self, role: str) -> str:
+        """Delegates to orchestrator model retrieval."""
+        return self.vromlix.get_model(role)
+
+    def get_optimal_model(self, task_type: str, complexity: str = "medium") -> str:
+        """SOTA Logic: Maps human task descriptions to technical roles."""
+        role_mapping = {
+            "code_generation": "PRECISION",
+            "reasoning": "PRECISION",
+            "auditing": "PRECISION",
+            "json_extraction": "VOLUMEN",
+            "rag": "VOLUMEN",
+            "triage": "VOLUMEN",
+            "embeddings": "EMBEDDINGS",
+            "image_generation": "IMAGEN_FAST",
+            "audio_processing": "AUDIO_NATIVO",
+        }
+        role = role_mapping.get(task_type, "VOLUMEN")
+
+        # Contextual upgrade
+        if complexity == "high" and role == "VOLUMEN":
+            role = "PRECISION"
+
+        return self.get_model_with_fallback(role)
