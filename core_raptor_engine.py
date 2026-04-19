@@ -151,6 +151,14 @@ class VromlixRaptorEngine:
 
     def audit_summary(self, summary: RaptorSummaryNode, original_chunks: list[str]) -> RaptorAudit:
         """Fase Checker: El Auditor Forense valida la calidad del resumen."""
+        # FIX SOTA: Polimorfismo total para manejar Pydantic vs VromlixResponse
+        if hasattr(summary, "model_dump_json"):
+            summary_text = summary.model_dump_json()
+        elif hasattr(summary, "text"):
+            summary_text = summary.text
+        else:
+            summary_text = str(summary)
+
         sys_prompt = """
         Eres el Vromlix Forensic Auditor. Tu misión es RECHAZAR resúmenes mediocres.
         CRITERIOS DE RECHAZO:
@@ -158,14 +166,23 @@ class VromlixRaptorEngine:
         2. Omisión de entidades técnicas clave (nombres de librerías, algoritmos, métricas).
         3. Resumen que no aporta más valor que la suma de sus partes.
         """
-        user_prompt = f"ORIGINAL CHUNKS:\n{original_chunks}\n\nPROPOSED SUMMARY:\n{summary.text}"
+        user_prompt = f"ORIGINAL CHUNKS:\n{original_chunks}\n\nPROPOSED SUMMARY:\n{summary_text}"
 
-        return vromlix.query_universal_llm(
+        res = vromlix.query_universal_llm(
             system_prompt=sys_prompt,
             user_prompt=user_prompt,
             role="CONSOLIDATOR",
             response_model=RaptorAudit,
         )
+
+        # FIX SOTA: Manejar fallos de validación del Auditor (si devuelve VromlixResponse)
+        if isinstance(res, RaptorAudit):
+            return res
+
+        # Si falló la validación estructurada, intentamos parsear el texto del fallback
+        raw_text = res.text if hasattr(res, "text") else str(res)
+        approved = any(x in raw_text.upper() for x in ["APROBADO", "APPROVED", "TRUE"])
+        return RaptorAudit(approved=approved, feedback=raw_text)
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True
@@ -191,6 +208,17 @@ class VromlixRaptorEngine:
                 role="CONSOLIDATOR",
                 response_model=RaptorSummaryNode,
             )
+
+            # FIX SOTA: Si el Maker falló en devolver JSON, lo envolvemos para el Auditor
+            if not isinstance(summary, RaptorSummaryNode):
+                summary = RaptorSummaryNode(
+                    cluster_theme="Auto-Generated Recovery",
+                    comprehensive_summary=(
+                        summary.text if hasattr(summary, "text") else str(summary)
+                    ),
+                    extracted_entities=[],
+                    critical_claims=[],
+                )
 
             # 2. Auditar (Checker)
             audit = self.audit_summary(summary, chunks)
