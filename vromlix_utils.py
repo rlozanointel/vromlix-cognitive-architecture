@@ -32,11 +32,9 @@ from typing import Any, ClassVar
 import feedparser
 import httpx
 import instructor
-import numpy as np
 from google import genai
 from google.genai import types
 from openai import OpenAI
-from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="duckduckgo_search")
@@ -172,15 +170,14 @@ class OSINTGrounder:
         prompt_sintesis = prompt_template.format(raw_json=json_slice)
 
         try:
-            client = genai.Client(api_key=vromlix.get_api_key())
-            response = client.models.generate_content(
-                model=vromlix.get_model("VOLUMEN"),
-                contents=prompt_sintesis,
-                config=types.GenerateContentConfig(temperature=0.1),
+            # FIX SOTA: Delegar al Bridge Universal para usar la cascada de 4 niveles
+            response = vromlix.query_universal_llm(
+                system_prompt="You are an OSINT Analyst.",
+                user_prompt=prompt_sintesis,
+                role="VOLUMEN",
             )
-            logging.info("✅ [OSINT] Executive RSS Report generated successfully.")
-            res_text = getattr(response, "text", "")
-            return res_text.strip() if res_text else ""
+            logging.info("✅ [OSINT] Executive RSS Report generated successfully via Bridge.")
+            return response.text.strip()
         except Exception as e:
             logging.error(f"❌ Error in OSINT synthesis: {e}")
             return "ERROR: News synthesis failed."
@@ -910,16 +907,23 @@ class VromlixOrchestrator:
                             user_prompt=user_prompt,
                         )
 
-                        # Si se requiere JSON, intentamos parsearlo rudimentariamente
+                        # Si se requiere JSON, intentamos parsearlo (SOTA Blindado)
                         if response_model:
                             try:
                                 import json
 
-                                # Buscar el primer bloque JSON en la respuesta
-                                json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                                # 1. Limpiar posibles bloques markdown (```json ... ```)
+                                clean_text = re.sub(
+                                    r"```(?:json)?\n?(.*?)\n?```", r"\1", text, flags=re.DOTALL
+                                )
+
+                                # 2. Extraer el objeto JSON puro
+                                json_match = re.search(r"\{.*\}", clean_text, re.DOTALL)
                                 if json_match:
                                     parsed = json.loads(json_match.group(0))
                                     return response_model(**parsed)
+                                else:
+                                    raise ValueError("No JSON object found in local model output.")
                             except Exception as e:
                                 logging.error(f"Local JSON parse failed: {e}")
                                 raise ValueError(
@@ -1064,236 +1068,6 @@ class IOManager:
         else:
             dir_path = input(f"📂 {title}: ").strip()
             return dir_path if Path(dir_path).exists() else None
-
-
-class RaptorSummaryNode(BaseModel):
-    cluster_theme: str = Field(
-        description="A concise, 3-to-5 word technical title for the cluster."
-    )
-    comprehensive_summary: str = Field(
-        description=(
-            "SOTA Brevity: A high-density summary (max 3 sentences) "
-            "synthesizing the core technical concepts."
-        )
-    )
-    extracted_entities: list[str] = Field(
-        description="Exhaustive array containing vital proper nouns, algorithms, or metrics."
-    )
-    critical_claims: list[str] = Field(
-        description="Exact, definitive assertions or factual declarations sourced directly."
-    )
-    contradictions_or_gaps: str | None = Field(
-        description="Note any direct contradictions, or null if none exist."
-    )
-
-
-class VromlixRaptorEngine:
-    def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or str(vromlix.paths.databases / "vromlix_memory.sqlite")
-        try:
-            import sqlite_vec
-
-            self.sqlite_vec = sqlite_vec
-        except ImportError:
-            self.sqlite_vec = None
-
-    def _get_connection(self):
-        conn = sqlite3.connect(self.db_path)
-        if self.sqlite_vec:
-            conn.enable_load_extension(True)
-            self.sqlite_vec.load(conn)
-        return conn
-
-    def reset_hierarchy(self):
-        """Delete entire previous hierarchy to force global SOTA re-consolidation."""
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM vromlix_metadata WHERE chunk_type = 'summary_node'")
-            cursor.execute("UPDATE vromlix_metadata SET parent_id = NULL")
-            cursor.execute(
-                "DELETE FROM vromlix_vectors WHERE id NOT IN (SELECT id FROM vromlix_metadata)"
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    def get_unconsolidated_leaves(self, target_level: int = 0) -> list:
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT m.id, m.content, v.embedding
-                FROM vromlix_metadata m
-                JOIN vromlix_vectors v ON m.id = v.id
-                WHERE m.tree_level = ? AND m.parent_id IS NULL AND m.chunk_type != 'summary_node'
-            """,
-                (target_level,),
-            )
-            return cursor.fetchall()
-        finally:
-            conn.close()
-
-    def determine_optimal_clusters(self, embeddings_matrix: np.ndarray, max_k: int = 50) -> tuple:
-        try:
-            import umap
-            from sklearn.mixture import GaussianMixture
-        except ImportError:
-            logging.error("❌ [RAPTOR] Error: 'umap-learn' or 'scikit-learn' not installed.")
-            return (None, None)
-
-        N = len(embeddings_matrix)
-        if N < 12:
-            return (1, np.zeros(N, dtype=int)) if N > 0 else (None, None)
-
-        reducer = umap.UMAP(
-            n_components=min(10, N - 1), n_neighbors=min(15, N - 1), random_state=42
-        )
-        reduced_embeddings = np.float64(reducer.fit_transform(embeddings_matrix))
-
-        bics, models = [], []
-        k_range = range(1, min(max_k, N // 2) + 1)
-
-        for k in k_range:
-            gmm = GaussianMixture(
-                n_components=k, covariance_type="full", random_state=42, reg_covar=1e-4
-            )
-            gmm.fit(reduced_embeddings)
-            bics.append(gmm.bic(reduced_embeddings))
-            models.append(gmm)
-
-        optimal_k_idx = np.argmin(bics)
-        return k_range[optimal_k_idx], models[optimal_k_idx].predict(reduced_embeddings)
-
-    @retry(
-        # Resistencia: El Router Universal ya maneja sus propios reintentos y pausas
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-    )
-    def generate_summary_node(self, chunks: list[str]) -> RaptorSummaryNode:
-        payload = "\n".join([f"CHUNK_{str(i + 1).zfill(2)}: {c}" for i, c in enumerate(chunks)])
-
-        system_prompt = (
-            "You are an expert-level Knowledge Consolidation Engine (RAPTOR). "
-            "Synthesize this cluster into a BRIEF, high-density parent node. "
-            "CRITICAL: Use maximum 3 sentences for the comprehensive_summary."
-        )
-        user_prompt = f"<ingestion_payload>\n{payload}\n</ingestion_payload>"
-
-        try:
-            # SOTA: Delegar al Router Universal (Groq -> Gemini -> GitHub -> Local)
-            response = vromlix.query_universal_llm(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                role="VOLUMEN",
-                response_model=RaptorSummaryNode,
-            )
-
-            # Si todos los fallbacks fallaron, el router devuelve un VromlixResponse con el error
-            if isinstance(response, VromlixResponse) and "CRITICAL ERROR" in response.text:
-                raise RuntimeError(response.text)
-
-            # SOTA: 'response' ya es un objeto Pydantic validado por Instructor
-            return response
-
-        except Exception as e:
-            logging.error(f"[RAPTOR] Error generating summary node: {e}")
-            raise e
-
-    @retry(
-        stop=stop_after_attempt(20),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-    )
-    def embed_and_store_parent(
-        self, summary_node: RaptorSummaryNode, child_ids: list[int], cluster_id: int
-    ):
-        summary_text = (
-            f"THEME: {summary_node.cluster_theme}\n"
-            f"SUMMARY: {summary_node.comprehensive_summary}\n"
-            f"ENTITIES: {', '.join(summary_node.extracted_entities)}"
-        )
-
-        try:
-            # Usar el Dictador Local (Jina) a través de vromlix_utils
-            vector = vromlix.get_embeddings(summary_text, role="EMBEDDINGS")
-            if not vector:
-                raise ValueError("No embeddings returned from local engine")
-        except Exception as e:
-            logging.error(f"Error generating embedding for RAPTOR node: {e}")
-            raise e
-
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO vromlix_metadata (source_file, chunk_type, content, "
-                "tree_level, cluster_id) VALUES (?, ?, ?, ?, ?)",
-                ("RAPTOR_CONSOLIDATION", "summary_node", summary_text, 1, cluster_id),
-            )
-            parent_id = cursor.lastrowid
-            cursor.execute(
-                "INSERT INTO vromlix_vectors (id, embedding) VALUES (?, ?)",
-                (parent_id, json.dumps(vector)),
-            )
-            placeholders = ",".join("?" * len(child_ids))
-            cursor.execute(
-                f"UPDATE vromlix_metadata SET parent_id = ? WHERE id IN ({placeholders})",
-                (parent_id, *child_ids),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        return True
-
-    def run_consolidation(self, force_full: bool = False) -> None:
-        if force_full:
-            self.reset_hierarchy()
-        records = self.get_unconsolidated_leaves(target_level=0)
-        if not records:
-            logging.info("✅ No orphan nodes to consolidate.")
-            return
-
-        ids = [int(r[0]) for r in records]
-        texts = [str(r[1]) for r in records]
-        embeddings = np.array(
-            [
-                np.frombuffer(r[2], dtype=np.float32)
-                if isinstance(r[2], bytes)
-                else json.loads(r[2])
-                for r in records
-            ],
-            dtype=np.float32,
-        )
-
-        optimal_k, labels = self.determine_optimal_clusters(embeddings)
-        if optimal_k is None:
-            return
-
-        logging.debug(f"🚀 Starting Semantic Consolidation ({optimal_k} parent nodes projected)...")
-        for cluster_id in range(optimal_k):
-            cluster_indices = np.where(labels == cluster_id)[0]
-            cluster_indices_list = list(cluster_indices)
-            cluster_texts = [str(texts[int(i)]) for i in cluster_indices_list][:20]
-            cluster_db_ids = [int(ids[int(i)]) for i in cluster_indices_list]
-
-            print(
-                f"\r   ⏳ Synthesizing: [{cluster_id + 1}/{optimal_k}] "
-                f"({(cluster_id + 1) / optimal_k * 100:.1f}%) | Cluster: {cluster_id + 1}",
-                end="",
-                flush=True,
-            )
-            try:
-                summary_obj = self.generate_summary_node(cluster_texts)
-                if summary_obj:
-                    self.embed_and_store_parent(summary_obj, cluster_db_ids, cluster_id)
-                time.sleep(0.5)
-            except Exception as e:
-                error_msg = str(e)
-                print(f"\n   ❌ Error in cluster {cluster_id + 1}: {error_msg[:100]}")
-        print("\n🎉 RAPTOR OPERATION COMPLETED. Memory successfully consolidated.")
 
 
 class ModelSelector:
