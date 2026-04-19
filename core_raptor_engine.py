@@ -259,7 +259,17 @@ class VromlixRaptorEngine:
 
         ids = [int(r[0]) for r in records]
         texts = [str(r[1]) for r in records]
-        embeddings = np.array([json.loads(r[2]) for r in records], dtype=np.float32)
+        embeddings = np.array(
+            [
+                (
+                    np.frombuffer(r[2], dtype=np.float32)
+                    if isinstance(r[2], bytes)
+                    else json.loads(r[2])
+                )
+                for r in records
+            ],
+            dtype=np.float32,
+        )
 
         optimal_k, labels = self.determine_optimal_clusters(embeddings)
         if optimal_k is None:
