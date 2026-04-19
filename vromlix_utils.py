@@ -29,13 +29,20 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
-import feedparser
-import httpx
-import instructor
-from google import genai
-from google.genai import types
-from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
+# --- VROMLIX DEPENDENCY SHIELD (SOTA Resilience) ---
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential
+except ImportError:
+    # Fallback to dummy decorators if tenacity is missing
+    def retry(*args, **kwargs):
+        return lambda f: f
+
+    def stop_after_attempt(*args, **kwargs):
+        return None
+
+    def wait_exponential(*args, **kwargs):
+        return None
+
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="duckduckgo_search")
 logging.getLogger("duckduckgo_search").setLevel(logging.ERROR)
@@ -114,8 +121,12 @@ class OSINTGrounder:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         results = []
         try:
+            import httpx
+
             response = httpx.get(url, headers=headers, timeout=10.0)
             if response.status_code == 200:
+                import feedparser
+
                 feed = feedparser.parse(response.content)
                 results.extend(
                     [
@@ -139,9 +150,13 @@ class OSINTGrounder:
     )
     def fetch_rss_summary(self, url: str) -> str:
         try:
+            import httpx
+
             with httpx.Client(timeout=15.0) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
+                import feedparser
+
                 feed = feedparser.parse(resp.text)
                 items = [f"{e.title}: {e.summary[:200]}" for e in feed.entries[:3]]
                 return "\n".join(items) if items else "No entries found."
@@ -598,6 +613,8 @@ class VromlixOrchestrator:
 
     def get_safety_settings(self) -> list[Any]:
         try:
+            from google.genai import types
+
             return [
                 types.SafetySetting(
                     category=getattr(types.HarmCategory, c),
@@ -610,7 +627,7 @@ class VromlixOrchestrator:
                     "HARM_CATEGORY_SEXUALLY_EXPLICIT",
                 ]
             ]
-        except ImportError:
+        except (ImportError, AttributeError):
             return []
 
     def query_local_ollm(
@@ -696,6 +713,8 @@ class VromlixOrchestrator:
 
             elif prov["id"] == "google":
                 try:
+                    from google import genai
+
                     api_key = self.get_api_key(provider="gemini")
                     client = genai.Client(api_key=api_key)
                     res = client.models.embed_content(model=prov["model"], contents=text)
@@ -753,6 +772,9 @@ class VromlixOrchestrator:
             try:
                 match prov["id"]:
                     case "groq":
+                        import instructor
+                        from openai import OpenAI
+
                         api_key = self.get_api_key(provider="groq")
                         if not api_key:
                             continue
@@ -793,6 +815,10 @@ class VromlixOrchestrator:
                         return VromlixResponse(text, "", usage)
 
                     case "google":
+                        import instructor
+                        from google import genai
+                        from google.genai import types
+
                         api_key = self.get_api_key(provider="gemini")
                         if not api_key:
                             continue
@@ -845,6 +871,9 @@ class VromlixOrchestrator:
                         )
 
                     case "github":
+                        import instructor
+                        from openai import OpenAI
+
                         token = self.get_secret("GITHUB_TOKEN")
                         if not token:
                             continue
