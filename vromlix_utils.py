@@ -714,10 +714,15 @@ class VromlixOrchestrator:
             elif prov["id"] == "google":
                 try:
                     from google import genai
+                    from google.genai import types
 
                     api_key = self.get_api_key(provider="gemini")
                     client = genai.Client(api_key=api_key)
-                    res = client.models.embed_content(model=prov["model"], contents=text)
+                    res = client.models.embed_content(
+                        model=prov["model"],
+                        contents=text,
+                        config=types.EmbedContentConfig(output_dimensionality=768),
+                    )
                     return res.embeddings[0].values
                 except Exception as e:
                     logging.error(f"[EMBEDDINGS] Error en Gemini: {e}")

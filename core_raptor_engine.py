@@ -12,6 +12,7 @@
 #     "scikit-learn-intelex",
 #     "umap-learn>=0.5.11",
 #     "numpy>=1.24.0",
+#     "jsonref",
 # ]
 # ///
 
