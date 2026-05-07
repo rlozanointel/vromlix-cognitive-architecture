@@ -11,7 +11,7 @@
 #     "lxml>=5.1.0",
 #     "sqlite-vec>=0.1.3",
 #     "tqdm>=4.66.0",
-#     "markitdown>=0.0.1a4",
+#     "markitdown[pdf,docx]>=0.0.1a4",
 #     "umap-learn>=0.5.11",
 #     "scikit-learn>=1.5.0",
 #     "numpy>=1.24.0",
