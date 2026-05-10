@@ -995,10 +995,14 @@ class VromlixOrchestrator:
 
         return VromlixResponse(f"CRITICAL ERROR: All 4 providers failed. Last error: {last_error}")
 
-    def update_knowledge_base(self, source_folder_name: str, db_filename: str):
+    def update_knowledge_base(
+        self, source_folder_name: str, db_filename: str, exclude_list: list[str] | None = None
+    ):
         """
         Orchestrator Command: Orders the Universal Indexer to vectorize a specific folder.
-        Example: update_knowledge_base("02_projects", "projects_index.sqlite")
+        Example: update_knowledge_base(
+            "02_projects", "projects_index.sqlite", exclude_list=["temp"]
+        )
         """
         import subprocess
 
@@ -1021,6 +1025,9 @@ class VromlixOrchestrator:
             "--db",
             db_filename,
         ]
+
+        if exclude_list:
+            cmd.extend(["--exclude", *exclude_list])
 
         try:
             subprocess.run(cmd, check=True)

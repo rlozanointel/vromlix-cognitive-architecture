@@ -479,8 +479,13 @@ class VromlixKnowledgeIndexer:
                         and d not in ["02_projects", "99_deep_storage", "05_docs"]
                     ]
                 else:
+                    # SOTA FIX: Aplicar exclusiones dinámicas si se proporcionan
                     valid_dirs = [
-                        d for d in dirs if d not in EXCLUDED_DIRS and not d.startswith(".")
+                        d
+                        for d in dirs
+                        if d not in EXCLUDED_DIRS
+                        and not d.startswith(".")
+                        and (not hasattr(self, "exclude_list") or d not in self.exclude_list)
                     ]
                 dirs.clear()
                 dirs.extend(valid_dirs)
@@ -649,7 +654,15 @@ if __name__ == "__main__":
         required=True,
         help="Nombre del archivo SQLite de salida (ej. projects.sqlite)",
     )
+    parser.add_argument(
+        "--exclude",
+        nargs="+",
+        default=[],
+        help="Nombres de subcarpetas a excluir del escaneo",
+    )
     args = parser.parse_args()
 
     indexer = VromlixKnowledgeIndexer(source_dir=args.source, db_name=args.db)
+    if args.exclude:
+        indexer.exclude_list = args.exclude
     indexer.process_directories()
