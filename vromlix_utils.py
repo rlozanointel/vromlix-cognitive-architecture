@@ -679,13 +679,15 @@ class VromlixOrchestrator:
         )
         return response["choices"][0]["message"]["content"].strip()
 
-    def get_embeddings(self, text: str, role: str = "EMBEDDINGS") -> list[float]:
+    def get_embeddings(self, text: str | list[str], role: str = "EMBEDDINGS") -> Any:
         info = self.get_model_capabilities(role)
         providers = []
         if info and info.get("model_id"):
             providers.append({"id": info.get("provider"), "model": info.get("model_id")})
         if info and info.get("fallback"):
             providers.append({"id": info.get("fallback_provider"), "model": info.get("fallback")})
+
+        is_batch = isinstance(text, list)
 
         for prov in providers:
             if prov["id"] == "local_llama_cpp":
@@ -698,14 +700,19 @@ class VromlixOrchestrator:
                     devnull = os.open(os.devnull, os.O_WRONLY)
                     os.dup2(devnull, fd)
                     try:
-                        from typing import cast
-
-                        response = self._local_embedder.create_embedding(text)
-                        return cast(list[float], response["data"][0]["embedding"])
+                        if is_batch:
+                            embeddings = []
+                            for t in text:
+                                response = self._local_embedder.create_embedding(t)
+                                embeddings.append(response["data"][0]["embedding"])
+                            return embeddings
+                        else:
+                            response = self._local_embedder.create_embedding(text)
+                            return response["data"][0]["embedding"]
                     except Exception as e:
                         os.dup2(old_stderr, fd)
                         logging.error(f"[EMBEDDINGS] Error en Jina Local: {e}")
-                        continue  # Intenta el fallback
+                        continue
                     finally:
                         os.dup2(old_stderr, fd)
                         os.close(devnull)
@@ -723,7 +730,10 @@ class VromlixOrchestrator:
                         contents=text,
                         config=types.EmbedContentConfig(output_dimensionality=768),
                     )
-                    return res.embeddings[0].values
+                    if is_batch:
+                        return [e.values for e in res.embeddings]
+                    else:
+                        return res.embeddings[0].values
                 except Exception as e:
                     logging.error(f"[EMBEDDINGS] Error en Gemini: {e}")
                     continue

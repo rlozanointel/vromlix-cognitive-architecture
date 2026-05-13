@@ -50,7 +50,7 @@ from vromlix_utils import vromlix
 
 # --- CENTRALIZED CONFIGURATION ---
 # Strict mathematical limit: 35 chunks * ~500 tokens = ~17,500 tokens per Batch
-BATCH_SIZE = 35
+BATCH_SIZE = 50
 
 
 class VromlixKnowledgeIndexer:
@@ -311,6 +311,51 @@ class VromlixKnowledgeIndexer:
             logging.error(f"Error en embedding {filepath}: {e}")
             raise
 
+    def _batch_embed_and_store_tasks(self, tasks: list[dict], cursor) -> bool:
+        """SOTA Global Batch Ingestion: Maneja chunks de múltiples archivos en una sola llamada."""
+        try:
+            texts = [t["text"] for t in tasks]
+            vectors = vromlix.get_embeddings(texts, role="EMBEDDINGS")
+            if not vectors or len(vectors) != len(texts):
+                logging.error("❌ Batch embedding failed (API response mismatch)")
+                return False
+
+            for task, vector in zip(tasks, vectors, strict=True):
+                filepath = task["filepath"]
+                text = task["text"]
+
+                # Classification
+                net_type = "W"
+                fp_lower = filepath.lower()
+                if fp_lower.endswith(".csv") or any(x in fp_lower for x in ["chat", "session"]):
+                    net_type = "B"
+                elif any(x in fp_lower for x in ["raptor", "summary"]):
+                    net_type = "S"
+                elif any(x in fp_lower for x in ["perfil_psicologico", "opinion"]):
+                    net_type = "O"
+
+                cursor.execute(
+                    (
+                        "INSERT INTO vromlix_metadata "
+                        "(source_file, chunk_type, content, network_type) VALUES (?, ?, ?, ?)"
+                    ),
+                    (filepath, "auto_routed", text, net_type),
+                )
+                row_id = cursor.lastrowid
+                cursor.execute(
+                    "INSERT INTO vromlix_vectors (id, embedding) VALUES (?, ?)",
+                    (row_id, json.dumps(vector)),
+                )
+            return True
+        except Exception as e:
+            logging.error(f"❌ Critical error in global batch embedding: {e}")
+            return False
+
+    def _batch_embed_and_store(self, filepath: str, texts: list[str], cursor) -> bool:
+        """Backward compatibility for process_single_file."""
+        tasks = [{"filepath": filepath, "text": t} for t in texts]
+        return self._batch_embed_and_store_tasks(tasks, cursor)
+
     def process_single_file(self, filepath: str) -> bool:
         """Incremental ingestion of a single file with hash management and prior purging."""
         # SOTA FIX: Normalizar a ruta absoluta canónica para consistencia en el ledger
@@ -353,10 +398,11 @@ class VromlixKnowledgeIndexer:
             return False
 
         total_inserted = 0
-        for text in chunks:
-            task = {"filepath": filepath, "text": text}
-            if self._embed_and_store(task, cursor):
-                total_inserted += 1
+        # SOTA BATCHING: Optimizado para Gemini batch embeddings
+        for i in range(0, len(chunks), BATCH_SIZE):
+            batch = chunks[i : i + BATCH_SIZE]
+            if self._batch_embed_and_store(filepath, batch, cursor):
+                total_inserted += len(batch)
 
         # 4. Update hash ledger
         cursor.execute(
@@ -588,35 +634,30 @@ class VromlixKnowledgeIndexer:
             )
         self.db.commit()
 
-        # 4. SOTA DRIP VECTORIZATION (1-by-1)
+        # 4. SOTA DRIP VECTORIZATION (Batch Optimized)
         total_tasks = len(all_tasks)
         processed_files = set()
 
         if total_tasks > 0:
-            print(f"\n   Processing {total_tasks} chunks...")
-            for i, task in enumerate(all_tasks):
+            print(f"\n   Processing {total_tasks} chunks in batches of {BATCH_SIZE}...")
+            for i in range(0, total_tasks, BATCH_SIZE):
+                batch = all_tasks[i : i + BATCH_SIZE]
                 try:
-                    if self._embed_and_store(task, cursor):
-                        processed_files.add((task["filepath"], task["file_hash"]))
+                    if self._batch_embed_and_store_tasks(batch, cursor):
+                        for t in batch:
+                            processed_files.add((t["filepath"], t["file_hash"]))
 
-                    if (i + 1) % 50 == 0 or (i + 1) == total_tasks:
-                        progress_pct = (i + 1) / total_tasks * 100
-                        sys.stdout.write(
-                            f"\r   \u26cf Vectorizando chunks [{i + 1}/{total_tasks}] "
-                            f"({progress_pct:.1f}%)..."
-                        )
-                        sys.stdout.flush()
+                    progress_count = min(i + BATCH_SIZE, total_tasks)
+                    progress_pct = progress_count / total_tasks * 100
+                    sys.stdout.write(
+                        f"\r   \u26cf Vectorizando chunks [{progress_count}/{total_tasks}] "
+                        f"({progress_pct:.1f}%)..."
+                    )
+                    sys.stdout.flush()
                 except Exception as e:
-                    msg = str(e)
-                    if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                        print(
-                            f"\n   [QUOTA] Regional limit reached on "
-                            f"{Path(task['filepath']).name}. Retrying..."
-                        )
-                    else:
-                        print(f"\n   Error in {Path(task['filepath']).name}: {msg[:100]}...")
+                    logging.error(f"\n   Error in batch starting at {i}: {e}")
 
-                if (i + 1) % 50 == 0:
+                if (i // BATCH_SIZE + 1) % 5 == 0:
                     self.db.commit()
             print(f"\n✅ Procesamiento completado: {len(processed_files)} chunks nuevos integrados")
         # Silenciamos detalles para el dashboard
